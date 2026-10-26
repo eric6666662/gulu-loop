@@ -1,6 +1,17 @@
 @import "tailwindcss";
 @import "./tokens.css";
 
+/* 布局壳：body 上是 h-dvh，但 Vue 挂载点 #app 默认没有高度，
+   内层 `h-full` 会解析成内容高度（整页塌成内容高度，侧栏底部按钮跟着上移）。
+   base 层优先级低于 utilities，body 上的 h-dvh 仍然生效。 */
+@layer base {
+  html,
+  body,
+  #app {
+    height: 100%;
+  }
+}
+
 /* 原型里的手工样式（类名保持一致，见 02-前端设计.md §8） */
 @layer components {
   .scroll-thin {
