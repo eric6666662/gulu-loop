@@ -256,3 +256,83 @@ describe('useChat · 错误来源区分', () => {
     expect(errorKind.value).toBe('load')
   })
 })
+
+describe('useChat.retry / edit', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  const thread: Message[] = [
+    { ...msg(1, '第一问'), id: 'm1', role: 'user' },
+    { ...msg(2, '第一答'), id: 'm2', role: 'assistant' },
+    { ...msg(3, '第二问'), id: 'm3', role: 'user' },
+    { ...msg(4, '第二答'), id: 'm4', role: 'assistant' },
+  ]
+
+  function mountWithThread() {
+    vi.spyOn(api, 'list').mockResolvedValue({ list: thread, hasMore: false })
+    return useChat(ref('c1'))
+  }
+
+  it('retry：截断该 assistant 及其后，带 messageId 重发', async () => {
+    const { messages, retry } = mountWithThread()
+    await vi.waitFor(() => expect(messages.value).toHaveLength(4))
+
+    const spy = fakeSend([
+      { type: 'start', assistantMessageId: 'm4-new', seq: 4, model: 'm', serviceProvider: 'p' },
+      deltaChunk('重答'),
+      { type: 'done', messageCount: 4 },
+    ])
+    await retry('m4')
+
+    expect(spy.mock.calls[0][1]).toMatchObject({ messageId: 'm4' })
+    expect(messages.value.map((m) => m.id)).toEqual(['m1', 'm2', 'm3', 'm4-new'])
+    expect(messages.value[3].content).toBe('重答')
+  })
+
+  it('edit：截断该 user 及其后，乐观插入新内容并带 messageId', async () => {
+    const { messages, edit } = mountWithThread()
+    await vi.waitFor(() => expect(messages.value).toHaveLength(4))
+
+    const spy = fakeSend([
+      { type: 'start', assistantMessageId: 'a-new', seq: 4, model: 'm', serviceProvider: 'p' },
+      { type: 'done', messageCount: 4 },
+    ])
+    await edit('m3', '改过的第二问')
+
+    expect(spy.mock.calls[0][1]).toMatchObject({ messageId: 'm3', content: '改过的第二问' })
+    const contents = messages.value.map((m) => m.content)
+    expect(contents).toContain('改过的第二问')
+    expect(contents).not.toContain('第二问')
+    expect(contents).not.toContain('第二答')
+  })
+
+  it('retry 一个不存在的消息 → 不发请求', async () => {
+    const { retry } = mountWithThread()
+    const spy = fakeSend([])
+
+    await retry('ghost')
+
+    expect(spy).not.toHaveBeenCalled()
+  })
+})
+
+describe('useChat · 乐观消息的服务端化', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('start 事件到达后，乐观 user 消息换成服务端 id 与 seq（排序与重试才不会错）', async () => {
+    vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
+    fakeSend([
+      { type: 'start', userMessageId: 'u-real', assistantMessageId: 'a1', seq: 2, model: 'm', serviceProvider: 'p' },
+      { type: 'done', messageCount: 2 },
+    ])
+
+    const { messages, send } = useChat(ref('c1'))
+    await send('你好')
+
+    const user = messages.value.find((m) => m.role === 'user')
+    expect(user?.id).toBe('u-real')
+    expect(user?.seq).toBe(1)
+    // 按 seq 排序时 user 在 assistant 之前
+    const ordered = [...messages.value].sort((a, b) => a.seq - b.seq)
+    expect(ordered.map((m) => m.role)).toEqual(['user', 'assistant'])
+  })
+})

@@ -38,8 +38,10 @@ export function list(
 }
 
 export interface SendInput {
-  content: string
+  /** 普通发送 / 编辑后重发时必填；重试（messageId 指向 assistant）时不需要 */
+  content?: string
   model?: string
+  /** 截断锚点（ADR-0006）：assistant=重试，user=编辑后重发 */
   messageId?: string
 }
 

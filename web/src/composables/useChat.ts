@@ -21,6 +21,10 @@ export interface UseChat {
   errorKind: Ref<'load' | 'stream' | ''>
   refresh: () => Promise<void>
   send: (text: string) => Promise<void>
+  /** 重试：截断这条 assistant 及其后，用前面最近的 user 内容重发（ADR-0006） */
+  retry: (messageId: string) => Promise<void>
+  /** 编辑后重发：截断这条 user 及其后，用新内容重发（ADR-0006） */
+  edit: (messageId: string, content: string) => Promise<void>
   stop: () => void
 }
 
@@ -91,24 +95,12 @@ export function useChat(conversationId: Ref<string>, deps: ChatDeps = {}): UseCh
     }
   }
 
-  async function send(text: string): Promise<void> {
-    const content = text.trim()
-    if (!content || status.value === 'streaming') return
-
-    let convId = conversationId.value
-    if (!convId) {
-      // 草稿态：先建会话（01-需求 #5b），建好通知 App 选中并插入侧栏
-      if (!deps.ensureConversation) return
-      try {
-        convId = await deps.ensureConversation()
-      } catch (e) {
-        error.value = e instanceof Error ? e.message : String(e)
-        status.value = 'error'
-        return
-      }
-      deps.onConversationReady?.(convId)
-    }
-
+  /** 一次流式往返的公共骨架：send / retry / edit 都走这里 */
+  async function runStream(
+    convId: string,
+    input: api.SendInput,
+    optimisticUser?: string,
+  ): Promise<void> {
     error.value = ''
     errorKind.value = ''
     status.value = 'streaming'
@@ -116,17 +108,27 @@ export function useChat(conversationId: Ref<string>, deps: ChatDeps = {}): UseCh
     // 否则历史晚回来会把乐观插入的消息整片覆盖掉（竞态）
     ticket++
 
-    // 乐观插入用户消息（前端先看见自己说的话）
-    messages.value = [
-      ...messages.value,
-      blankMessage({ id: `local-${Date.now()}`, conversationId: convId, role: 'user', content }),
-    ]
+    if (optimisticUser !== undefined) {
+      // 乐观插入用户消息（前端先看见自己说的话）
+      messages.value = [
+        ...messages.value,
+        blankMessage({ id: `local-${Date.now()}`, conversationId: convId, role: 'user', content: optimisticUser }),
+      ]
+    }
 
     let assistantId = ''
-    handle = api.send(convId, { content }, (e) => {
+    handle = api.send(convId, input, (e) => {
       switch (e.type) {
-        case 'start':
+        case 'start': {
           assistantId = e.assistantMessageId
+          // 把乐观插入的 user 消息换成服务端 id / seq：
+          // 否则它带着 `local-*` 与 seq=0，排序会跑到最前、重试/编辑也会拿错 id
+          const local = [...messages.value].reverse().find((m) => m.id.startsWith('local-'))
+          if (local && e.userMessageId) {
+            messages.value = messages.value.map((m) =>
+              m.id === local.id ? { ...m, id: e.userMessageId as string, seq: e.seq - 1 } : m,
+            )
+          }
           messages.value = [
             ...messages.value,
             blankMessage({
@@ -139,6 +141,7 @@ export function useChat(conversationId: Ref<string>, deps: ChatDeps = {}): UseCh
             }),
           ]
           break
+        }
         case 'delta':
           messages.value = messages.value.map((m) =>
             m.id === assistantId ? { ...m, content: m.content + e.content } : m,
@@ -163,11 +166,60 @@ export function useChat(conversationId: Ref<string>, deps: ChatDeps = {}): UseCh
       await handle.done
     } catch (e) {
       error.value = e instanceof Error ? e.message : String(e)
+      errorKind.value = 'stream'
       status.value = 'error'
     } finally {
       handle = null
       if (status.value === 'streaming') status.value = 'idle'
     }
+  }
+
+  async function send(text: string): Promise<void> {
+    const content = text.trim()
+    if (!content || status.value === 'streaming') return
+
+    let convId = conversationId.value
+    if (!convId) {
+      // 草稿态：先建会话（01-需求 #5b），建好通知 App 选中并插入侧栏
+      if (!deps.ensureConversation) return
+      try {
+        convId = await deps.ensureConversation()
+      } catch (e) {
+        error.value = e instanceof Error ? e.message : String(e)
+        errorKind.value = 'stream'
+        status.value = 'error'
+        return
+      }
+      deps.onConversationReady?.(convId)
+    }
+
+    await runStream(convId, { content }, content)
+  }
+
+  /** 重试：截断这条 assistant 及其后，用前面最近的 user 内容重发（ADR-0006） */
+  async function retry(messageId: string): Promise<void> {
+    const convId = conversationId.value
+    if (!convId || status.value === 'streaming') return
+
+    const anchor = messages.value.find((m) => m.id === messageId)
+    if (!anchor) return
+
+    // 本地先截断（服务端也会截断），让 UI 立刻回到"待生成"状态
+    messages.value = messages.value.filter((m) => m.seq < anchor.seq)
+    await runStream(convId, { messageId })
+  }
+
+  /** 编辑后重发：截断这条 user 及其后，用新内容重发（ADR-0006） */
+  async function edit(messageId: string, content: string): Promise<void> {
+    const convId = conversationId.value
+    const text = content.trim()
+    if (!convId || !text || status.value === 'streaming') return
+
+    const anchor = messages.value.find((m) => m.id === messageId)
+    if (!anchor) return
+
+    messages.value = messages.value.filter((m) => m.seq < anchor.seq)
+    await runStream(convId, { messageId, content: text }, text)
   }
 
   /** 停止生成：中断流，已收到的内容保留 */
@@ -177,5 +229,5 @@ export function useChat(conversationId: Ref<string>, deps: ChatDeps = {}): UseCh
     if (status.value === 'streaming') status.value = 'idle'
   }
 
-  return { messages, status, error, errorKind, refresh, send, stop }
+  return { messages, status, error, errorKind, refresh, send, retry, edit, stop }
 }

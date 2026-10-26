@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
+import { RefreshCw } from 'lucide-vue-next'
 import type { Message } from '../../api/messages'
 import { renderMarkdown } from '../../lib/markdown'
 import { relativeTime } from '../../lib/format'
 
 // 助手消息：无气泡、无边框，只有正文 + 落款行（02-ui设计.md MessageAssistant）
 const props = defineProps<{ message: Message }>()
+const emit = defineEmits<{ retry: [] }>()
 
 const html = ref('')
 
@@ -36,7 +38,21 @@ async function onCopyCode(e: MouseEvent): Promise<void> {
 
     <div data-footer class="mt-3 flex items-center gap-2">
       <span class="text-caption text-ink-muted">{{ message.model }}</span>
-      <time class="ml-auto text-caption text-ink-muted">{{ relativeTime(message.createdAt) }}</time>
+      <!-- 操作组：hover / focus-within 才出现（复制在任务 9） -->
+      <div
+        class="ml-auto flex items-center gap-1 opacity-0 transition-opacity duration-150 group-focus-within:opacity-100 group-hover:opacity-100"
+      >
+        <button
+          type="button"
+          data-retry
+          aria-label="重试这条回复"
+          class="flex size-7 items-center justify-center rounded-sm text-ink-muted transition-colors duration-150 hover:bg-surface-alt hover:text-ink"
+          @click="emit('retry')"
+        >
+          <RefreshCw class="size-4" :stroke-width="1.5" />
+        </button>
+      </div>
+      <time class="text-caption text-ink-muted">{{ relativeTime(message.createdAt) }}</time>
     </div>
   </div>
 </template>

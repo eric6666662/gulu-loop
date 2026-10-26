@@ -266,3 +266,165 @@ func TestSendBusy(t *testing.T) {
 	}
 	close(release)
 }
+
+// seedThread 预置一轮问答：user(seq1) + assistant(seq2) + user(seq3) + assistant(seq4)
+func seedThread(t *testing.T, db *sqlx.DB) {
+	t.Helper()
+	rows := []struct {
+		id, role, content string
+		seq               int64
+	}{
+		{"m1", "user", "第一问", 1},
+		{"m2", "assistant", "第一答", 2},
+		{"m3", "user", "第二问", 3},
+		{"m4", "assistant", "第二答", 4},
+	}
+	for _, r := range rows {
+		if _, err := db.Exec(`INSERT INTO x_messages (id,conversation_id,seq,role,content,model,service_provider)
+			VALUES (?,?,?,?,?,?,?)`, r.id, "c1", r.seq, r.role, r.content, "deepseek-v4-pro", "deepseek"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`UPDATE x_conversations SET message_count=4, last_message_time=datetime('now') WHERE id='c1'`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSendRetry 重试：截断该 assistant 及其后，用前面最近的 user 内容重发，seq 接上。
+func TestSendRetry(t *testing.T) {
+	baseURL, lastModel, _ := sseServer(t, "重答")
+	db := newSendDB(t)
+	seedConversation(t, db, baseURL, "sk-good")
+	seedThread(t, db)
+	svc := service.NewMessageService(db, llm.NewClient())
+
+	var events []service.SendEvent
+	err := svc.Send(context.Background(), service.SendRequest{ConversationID: "c1", MessageID: "m4"}, func(e service.SendEvent) error {
+		events = append(events, e)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Send(retry): %v", err)
+	}
+
+	// 只剩 m1/m2/m3 + 新 assistant（seq=4）
+	var rows []struct {
+		Seq     int64  `db:"seq"`
+		Role    string `db:"role"`
+		Content string `db:"content"`
+	}
+	if err := db.Select(&rows, `SELECT seq, role, content FROM x_messages WHERE conversation_id='c1' ORDER BY seq`); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 4 {
+		t.Fatalf("重试后应剩 4 条，实际 %d: %+v", len(rows), rows)
+	}
+	if rows[2].Content != "第二问" || rows[3].Content != "重答" || rows[3].Seq != 4 {
+		t.Fatalf("重试结果不符: %+v", rows)
+	}
+
+	var count int
+	if err := db.Get(&count, `SELECT message_count FROM x_conversations WHERE id='c1'`); err != nil {
+		t.Fatal(err)
+	}
+	if count != 4 {
+		t.Fatalf("message_count 应重算为 4，实际 %d", count)
+	}
+	if events[0].Type != "start" || events[0].Seq != 4 {
+		t.Fatalf("start 事件 seq 应为 4: %+v", events[0])
+	}
+	if *lastModel == "" {
+		t.Fatal("应调用上游")
+	}
+}
+
+// TestSendEdit 编辑后重发：截断该 user 及其后，用新内容重发。
+func TestSendEdit(t *testing.T) {
+	baseURL, _, _ := sseServer(t, "新答")
+	db := newSendDB(t)
+	seedConversation(t, db, baseURL, "sk-good")
+	seedThread(t, db)
+	svc := service.NewMessageService(db, llm.NewClient())
+
+	err := svc.Send(context.Background(), service.SendRequest{
+		ConversationID: "c1",
+		MessageID:      "m3",
+		Content:        "改过的第二问",
+	}, func(service.SendEvent) error { return nil })
+	if err != nil {
+		t.Fatalf("Send(edit): %v", err)
+	}
+
+	var rows []struct {
+		Seq     int64  `db:"seq"`
+		Role    string `db:"role"`
+		Content string `db:"content"`
+	}
+	if err := db.Select(&rows, `SELECT seq, role, content FROM x_messages WHERE conversation_id='c1' ORDER BY seq`); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 4 {
+		t.Fatalf("编辑后应剩 4 条，实际 %d: %+v", len(rows), rows)
+	}
+	if rows[2].Content != "改过的第二问" || rows[2].Seq != 3 || rows[3].Content != "新答" || rows[3].Seq != 4 {
+		t.Fatalf("编辑结果不符: %+v", rows)
+	}
+}
+
+// TestSendMessageIDErrors messageId 不存在 / 角色不支持 / 编辑缺 content / 重试找不到 user。
+func TestSendMessageIDErrors(t *testing.T) {
+	baseURL, _, _ := sseServer(t, "ok")
+
+	cases := []struct {
+		name       string
+		messageID  string
+		content    string
+		wantNoRows bool
+		wantMsg    string
+	}{
+		{"不存在", "nope", "", true, ""},
+		{"角色不支持", "sys1", "", false, "messageId 指向的消息角色不支持"},
+		{"编辑缺 content", "m3", "   ", false, "content 不能为空"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			db := newSendDB(t)
+			seedConversation(t, db, baseURL, "sk-good")
+			seedThread(t, db)
+			if _, err := db.Exec(`INSERT INTO x_messages (id,conversation_id,seq,role,content) VALUES ('sys1','c1',9,'system','sys')`); err != nil {
+				t.Fatal(err)
+			}
+			svc := service.NewMessageService(db, llm.NewClient())
+
+			err := svc.Send(context.Background(), service.SendRequest{ConversationID: "c1", MessageID: c.messageID, Content: c.content}, func(service.SendEvent) error { return nil })
+			if c.wantNoRows {
+				if !errors.Is(err, service.ErrMessageNotFound) {
+					t.Fatalf("应为 ErrMessageNotFound，实际 %v", err)
+				}
+				return
+			}
+			var ve *service.ValidationError
+			if !errors.As(err, &ve) || ve.Message != c.wantMsg {
+				t.Fatalf("应为 %q，实际 %v", c.wantMsg, err)
+			}
+		})
+	}
+}
+
+// TestSendRetryNoUserBefore 重试时前面没有 user 消息 → 400。
+func TestSendRetryNoUserBefore(t *testing.T) {
+	baseURL, _, _ := sseServer(t, "ok")
+	db := newSendDB(t)
+	seedConversation(t, db, baseURL, "sk-good")
+	if _, err := db.Exec(`INSERT INTO x_messages (id,conversation_id,seq,role,content) VALUES ('a1','c1',1,'assistant','孤儿回复')`); err != nil {
+		t.Fatal(err)
+	}
+	svc := service.NewMessageService(db, llm.NewClient())
+
+	err := svc.Send(context.Background(), service.SendRequest{ConversationID: "c1", MessageID: "a1"}, func(service.SendEvent) error { return nil })
+	var ve *service.ValidationError
+	if !errors.As(err, &ve) || !strings.Contains(ve.Message, "找不到可重试") {
+		t.Fatalf("应为找不到可重试的用户消息，实际 %v", err)
+	}
+}

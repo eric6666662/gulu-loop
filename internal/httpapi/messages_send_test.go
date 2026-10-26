@@ -144,7 +144,7 @@ func TestSendMessageValidation(t *testing.T) {
 		{"内容为空", "/api/v1/conversations/c1/messages", `{"content":"   "}`, http.StatusBadRequest, "content 不能为空"},
 		{"请求体不是 JSON", "/api/v1/conversations/c1/messages", "nope", http.StatusBadRequest, "请求体格式错误"},
 		{"会话不存在", "/api/v1/conversations/nope/messages", `{"content":"hi"}`, http.StatusNotFound, "会话不存在"},
-		{"messageId 暂未支持", "/api/v1/conversations/c1/messages", `{"content":"hi","messageId":"m1"}`, http.StatusBadRequest, "messageId 截断暂未实现"},
+		{"messageId 不存在", "/api/v1/conversations/c1/messages", `{"content":"hi","messageId":"nope"}`, http.StatusNotFound, "消息不存在"},
 	}
 
 	for _, c := range cases {
@@ -205,5 +205,51 @@ func TestSendMessageUpstreamError(t *testing.T) {
 	}
 	if msg, _ := last["message"].(string); !strings.Contains(msg, "上游返回 401") {
 		t.Fatalf("error message 不符: %v", last)
+	}
+}
+
+// TestSendMessageRetry 重试走同一端点：messageId 指向 assistant → 截断并重发。
+func TestSendMessageRetry(t *testing.T) {
+	srv, _ := newSendServer(t, "sk-good", "重答")
+
+	// 先正常发一轮，拿到 assistantMessageId
+	_, body := postSend(t, srv.URL+"/api/v1/conversations/c1/messages", `{"content":"第一问"}`)
+	events := readNDJSON(t, body)
+	assistantID, _ := events[0]["assistantMessageId"].(string)
+	if assistantID == "" {
+		t.Fatalf("没拿到 assistantMessageId: %s", body)
+	}
+
+	// 再发一条，然后重试第一条 assistant
+	postSend(t, srv.URL+"/api/v1/conversations/c1/messages", `{"content":"第二问"}`)
+
+	res, body := postSend(t, srv.URL+"/api/v1/conversations/c1/messages", `{"messageId":"`+assistantID+`"}`)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("应为 200，实际 %d %s", res.StatusCode, body)
+	}
+	retryEvents := readNDJSON(t, body)
+	if retryEvents[0]["type"] != "start" {
+		t.Fatalf("应以 start 开头: %s", body)
+	}
+
+	// 截断后：只剩「第一问 + 重答」两条（第二问及其后的消息都被删掉）
+	res2, err := http.Get(srv.URL + "/api/v1/conversations/c1/messages")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res2.Body.Close()
+	var env2 struct {
+		Data struct {
+			List []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"list"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(res2.Body).Decode(&env2); err != nil {
+		t.Fatal(err)
+	}
+	if len(env2.Data.List) != 2 {
+		t.Fatalf("重试后应剩 2 条，实际 %d: %+v", len(env2.Data.List), env2.Data.List)
 	}
 }

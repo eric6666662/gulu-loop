@@ -15,7 +15,15 @@ const props = defineProps<{
   errorKind?: 'load' | 'stream' | ''
   draft?: boolean
 }>()
-const emit = defineEmits<{ retry: []; 'focus-composer': []; 'open-settings': [] }>()
+const emit = defineEmits<{
+  /** 消息级重试（截断重发），与下面 StreamError 的 retry（重拉历史）区分开 */
+  'message-retry': [message: Message]
+  edit: [message: Message]
+  /** StreamError 的「重试」= 重新拉历史 */
+  retry: []
+  'focus-composer': []
+  'open-settings': []
+}>()
 
 // 后端按 seq 倒序返回，渲染前按 seq 升序（02-后端设计.md #6）
 const ordered = computed(() => [...props.messages].sort((a, b) => a.seq - b.seq))
@@ -47,8 +55,8 @@ const errorHint = computed(() =>
 
     <template v-else>
       <template v-for="m in ordered" :key="m.id">
-        <MessageUser v-if="m.role === 'user'" :message="m" />
-        <MessageAssistant v-else-if="m.role === 'assistant'" :message="m" />
+        <MessageUser v-if="m.role === 'user'" :message="m" @edit="emit('edit', m)" />
+        <MessageAssistant v-else-if="m.role === 'assistant'" :message="m" @retry="emit('message-retry', m)" />
       </template>
     </template>
 

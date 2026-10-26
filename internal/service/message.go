@@ -40,11 +40,17 @@ func NewMessageService(db *sqlx.DB, llmClient *llm.Client) *MessageService {
 // ErrConversationBusy 同一会话已有生成中的回复（handler 映射 409）。
 var ErrConversationBusy = errors.New("该会话正在生成回复")
 
+// ErrMessageNotFound 截断锚点（messageId）不存在（handler 映射 404「消息不存在」）。
+// 包着 sql.ErrNoRows，方便调用方统一用 errors.Is 判断"没找到"。
+var ErrMessageNotFound = fmt.Errorf("消息不存在: %w", sql.ErrNoRows)
+
 // SendRequest 是一次发送请求。
 type SendRequest struct {
 	ConversationID string
 	Content        string
-	Model          string // 可选：覆盖服务商默认模型
+	Model          string
+	// MessageID 是截断锚点（ADR-0006）：指向 assistant = 重试，指向 user = 编辑后重发
+	MessageID string
 }
 
 // SendEvent 是发送过程中抛给调用方（handler → NDJSON）的事件。
@@ -80,12 +86,13 @@ const contextRecentLimit = 10
 // 上游失败时 user 消息保留、assistant 不写入，错误原样返回（handler 转 error 事件）。
 // 事务里绝不放 LLM 调用（§3.1 规则 3）。
 func (ms *MessageService) Send(ctx context.Context, req SendRequest, emit func(SendEvent) error) error {
-	content := strings.TrimSpace(req.Content)
-	if content == "" {
-		return &ValidationError{Message: "content 不能为空"}
+	if _, err := ms.getConversation(ctx, req.ConversationID); err != nil {
+		return err
 	}
 
-	if _, err := ms.getConversation(ctx, req.ConversationID); err != nil {
+	// 先定"发什么、要不要截断"（ADR-0006 的 messageId 三态）
+	plan, err := ms.planSend(ctx, req)
+	if err != nil {
 		return err
 	}
 
@@ -107,17 +114,31 @@ func (ms *MessageService) Send(ctx context.Context, req SendRequest, emit func(S
 	}
 	defer ms.busy.Delete(req.ConversationID)
 
-	userMsg, err := ms.appendMessage(ctx, req.ConversationID, models.Message{
-		Role:    models.RoleUser,
-		Content: content,
-	})
-	if err != nil {
-		return err
+	// 截断（重试 / 编辑）：删掉锚点及其后所有消息，并重算计数与最后消息时间
+	if plan.truncateSeq > 0 {
+		if err := ms.truncateFrom(ctx, req.ConversationID, plan.truncateSeq); err != nil {
+			return err
+		}
+	}
+
+	userMessageID := plan.userID
+	if plan.appendUser {
+		userMsg, err := ms.appendMessage(ctx, req.ConversationID, models.Message{
+			Role:    models.RoleUser,
+			Content: plan.content,
+		})
+		if err != nil {
+			return err
+		}
+		userMessageID = userMsg.ID
 	}
 
 	history, err := ms.recentMessages(ctx, req.ConversationID, contextRecentLimit)
 	if err != nil {
 		return err
+	}
+	if len(history) == 0 {
+		return &ValidationError{Message: "上下文为空，无法发送"}
 	}
 	chatMessages := make([]llm.ChatMessage, 0, len(history))
 	for _, m := range history {
@@ -128,11 +149,11 @@ func (ms *MessageService) Send(ctx context.Context, req SendRequest, emit func(S
 	if err != nil {
 		return fmt.Errorf("生成消息 id: %w", err)
 	}
-	assistantSeq := userMsg.Seq + 1
+	assistantSeq := history[len(history)-1].Seq + 1
 
 	if err := emit(SendEvent{
 		Type:               "start",
-		UserMessageID:      userMsg.ID,
+		UserMessageID:      userMessageID,
 		AssistantMessageID: assistantID,
 		Seq:                assistantSeq,
 		Model:              model,
@@ -188,6 +209,98 @@ func (ms *MessageService) Send(ctx context.Context, req SendRequest, emit func(S
 		Model:              model,
 		ServiceProvider:    provider,
 		MessageCount:       int(assistantMsg.Total),
+	})
+}
+
+// sendPlan 是"这次发送要做什么"的结论（ADR-0006）。
+type sendPlan struct {
+	content     string // 要发给上游的最后一条 user 内容
+	appendUser  bool   // 是否新插一条 user 消息（重试时复用已有的）
+	truncateSeq int64  // >0 表示先删掉 seq >= truncateSeq 的消息
+	userID      string // 重试时沿用原 user 消息的 id（start 事件要回给前端）
+}
+
+// planSend 解析 messageId 的三态语义（02-后端设计.md §1.3 / ADR-0006）：
+//
+//	不带 messageId        → 追加新消息
+//	指向 assistant        → 重试：截断该条及其后，用它之前最近的 user 内容重发
+//	指向 user             → 编辑后重发：截断该条及其后，用请求体 content 重发
+//	指向 system / tool    → 400
+func (ms *MessageService) planSend(ctx context.Context, req SendRequest) (sendPlan, error) {
+	content := strings.TrimSpace(req.Content)
+
+	if req.MessageID == "" {
+		if content == "" {
+			return sendPlan{}, &ValidationError{Message: "content 不能为空"}
+		}
+		return sendPlan{content: content, appendUser: true}, nil
+	}
+
+	var anchor models.Message
+	const query = `SELECT ` + messageColumns + ` FROM x_messages WHERE conversation_id = ? AND id = ?`
+	if err := ms.db.GetContext(ctx, &anchor, query, req.ConversationID, req.MessageID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return sendPlan{}, ErrMessageNotFound
+		}
+		return sendPlan{}, fmt.Errorf("查询锚点消息 %s: %w", req.MessageID, err)
+	}
+
+	switch anchor.Role {
+	case models.RoleAssistant:
+		var prev models.Message
+		const prevQuery = `SELECT ` + messageColumns + ` FROM x_messages
+			WHERE conversation_id = ? AND seq < ? AND role = 'user'
+			ORDER BY seq DESC LIMIT 1`
+		if err := ms.db.GetContext(ctx, &prev, prevQuery, req.ConversationID, anchor.Seq); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return sendPlan{}, &ValidationError{Message: "找不到可重试的用户消息"}
+			}
+			return sendPlan{}, fmt.Errorf("查询可重试的用户消息: %w", err)
+		}
+		return sendPlan{
+			content:     prev.Content,
+			appendUser:  false,
+			truncateSeq: anchor.Seq,
+			userID:      prev.ID,
+		}, nil
+
+	case models.RoleUser:
+		if content == "" {
+			return sendPlan{}, &ValidationError{Message: "content 不能为空"}
+		}
+		return sendPlan{content: content, appendUser: true, truncateSeq: anchor.Seq}, nil
+
+	default:
+		return sendPlan{}, &ValidationError{Message: "messageId 指向的消息角色不支持"}
+	}
+}
+
+// truncateFrom 删除 seq >= fromSeq 的消息，并重算会话的计数与最后消息时间。
+//
+// 重算而不是 -N（02-后端设计.md §2 维护契约）；摘要锚点若落在被删区间内，
+// message_id / message_seq 同时置空（ConversationSummary 的一致性约定）。
+func (ms *MessageService) truncateFrom(ctx context.Context, conversationID string, fromSeq int64) error {
+	return dal.WithTx(ctx, ms.db, func(ctx context.Context, tx *sqlx.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM x_messages WHERE conversation_id = ? AND seq >= ?`, conversationID, fromSeq); err != nil {
+			return fmt.Errorf("截断会话 %s 的消息: %w", conversationID, err)
+		}
+
+		const recount = `UPDATE x_conversations SET
+			message_count     = (SELECT COUNT(*) FROM x_messages WHERE conversation_id = ?),
+			last_message_time = (SELECT created_at FROM x_messages WHERE conversation_id = ? ORDER BY seq DESC LIMIT 1)
+			WHERE id = ?`
+		if _, err := tx.ExecContext(ctx, recount, conversationID, conversationID, conversationID); err != nil {
+			return fmt.Errorf("重算会话 %s 的计数: %w", conversationID, err)
+		}
+
+		const clearSummary = `UPDATE x_conversation_summaries
+			SET message_id = NULL, message_seq = NULL, updated_at = ?
+			WHERE conversation_id = ? AND message_seq >= ?`
+		if _, err := tx.ExecContext(ctx, clearSummary, time.Now(), conversationID, fromSeq); err != nil {
+			return fmt.Errorf("清理会话 %s 的摘要锚点: %w", conversationID, err)
+		}
+		return nil
 	})
 }
 

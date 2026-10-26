@@ -47,3 +47,16 @@ describe('MessageAssistant', () => {
     expect(w.text()).not.toContain('让我想想')
   })
 })
+
+describe('MessageAssistant · 操作组', () => {
+  it('hover 操作组里有「重试」，点击 emit retry', async () => {
+    const w = mount(MessageAssistant, { props: { message: msg } })
+    await flushPromises()
+
+    const btn = w.find('[data-retry]')
+    expect(btn.attributes('aria-label')).toBe('重试这条回复')
+    await btn.trigger('click')
+
+    expect(w.emitted('retry')).toHaveLength(1)
+  })
+})

@@ -344,12 +344,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 		s.badRequest(r.Context(), w, "请求体格式错误")
 		return
 	}
-	if req.MessageID != "" {
-		// 任务 7 实现（ADR-0006 的截断语义）；先显式拒绝，避免被当成普通发送
-		s.badRequest(r.Context(), w, "messageId 截断暂未实现")
-		return
-	}
-	if strings.TrimSpace(req.Content) == "" {
+	if req.MessageID == "" && strings.TrimSpace(req.Content) == "" {
 		s.badRequest(r.Context(), w, "content 不能为空")
 		return
 	}
@@ -382,6 +377,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 		ConversationID: id,
 		Content:        req.Content,
 		Model:          req.Model,
+		MessageID:      req.MessageID,
 	}, func(e service.SendEvent) error {
 		// 每种事件只带契约里约定的字段（§1.3），不把内部结构整包透出去
 		switch e.Type {
@@ -439,6 +435,8 @@ func (s *Server) writeSendError(w http.ResponseWriter, r *http.Request, err erro
 		s.badRequest(ctx, w, ve.Message)
 	case errors.Is(err, service.ErrConversationBusy):
 		s.conflict(ctx, w, err.Error())
+	case errors.Is(err, service.ErrMessageNotFound):
+		s.notFound(ctx, w, "消息不存在")
 	case errors.Is(err, sql.ErrNoRows):
 		s.notFound(ctx, w, "会话不存在")
 	case isUpstreamError(err):
