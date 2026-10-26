@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -69,10 +70,15 @@ type SendEvent struct {
 	MessageCount       int
 }
 
-// contextRecentLimit 每次发送带上的最近消息条数。
-//
-// 任务 6 只做"最近 N 条"；摘要 + 三档拼接在任务 10（01-需求 #3）补上。
-const contextRecentLimit = 10
+// 上下文与摘要（01-需求 #3 / #4）
+const (
+	// contextRecentLimit 每次发送带上的最近消息条数
+	contextRecentLimit = 10
+	// summaryTriggerAt 消息数达到这个值后开始生成摘要
+	summaryTriggerAt = 10
+	// summaryTimeout 摘要生成的独立超时（不继承请求 ctx）
+	summaryTimeout = 60 * time.Second
+)
 
 // Send 发一条用户消息并流式接收助手回复。
 //
@@ -133,23 +139,24 @@ func (ms *MessageService) Send(ctx context.Context, req SendRequest, emit func(S
 		userMessageID = userMsg.ID
 	}
 
-	history, err := ms.recentMessages(ctx, req.ConversationID, contextRecentLimit)
+	chatMessages, err := ms.buildContext(ctx, req.ConversationID)
 	if err != nil {
 		return err
 	}
-	if len(history) == 0 {
+	if len(chatMessages) == 0 {
 		return &ValidationError{Message: "上下文为空，无法发送"}
-	}
-	chatMessages := make([]llm.ChatMessage, 0, len(history))
-	for _, m := range history {
-		chatMessages = append(chatMessages, llm.ChatMessage{Role: string(m.Role), Content: m.Content})
 	}
 
 	assistantID, err := models.NewUUID()
 	if err != nil {
 		return fmt.Errorf("生成消息 id: %w", err)
 	}
-	assistantSeq := history[len(history)-1].Seq + 1
+	var maxSeq int64
+	if err := ms.db.GetContext(ctx, &maxSeq,
+		`SELECT COALESCE(MAX(seq), 0) FROM x_messages WHERE conversation_id = ?`, req.ConversationID); err != nil {
+		return fmt.Errorf("取会话 %s 的最大 seq: %w", req.ConversationID, err)
+	}
+	assistantSeq := maxSeq + 1
 
 	if err := emit(SendEvent{
 		Type:               "start",
@@ -201,6 +208,9 @@ func (ms *MessageService) Send(ctx context.Context, req SendRequest, emit func(S
 	if err != nil {
 		return err
 	}
+
+	// 摘要：落库后**异步**触发（独立 context，不继承请求 ctx；失败只记日志）
+	go ms.summarizeAsync(req.ConversationID, provider, setting, model)
 
 	return emit(SendEvent{
 		Type:               "done",
@@ -394,6 +404,162 @@ func (ms *MessageService) firstProvider(ctx context.Context) (string, models.Pro
 		return "", models.ProviderSetting{}, fmt.Errorf("解析服务商 %s 的配置: %w", row.ServiceProvider, err)
 	}
 	return row.ServiceProvider, setting, nil
+}
+
+// buildContext 组装发给上游的上下文（01-需求 #3）：
+//
+//	消息数 ≤ 10 → 全部历史
+//	消息数 > 10 → 摘要（system）+ 最近 10 条（含刚插入的当前问题）
+func (ms *MessageService) buildContext(ctx context.Context, conversationID string) ([]llm.ChatMessage, error) {
+	var total int
+	if err := ms.db.GetContext(ctx, &total,
+		`SELECT COUNT(*) FROM x_messages WHERE conversation_id = ?`, conversationID); err != nil {
+		return nil, fmt.Errorf("统计会话 %s 的消息数: %w", conversationID, err)
+	}
+
+	limit := total
+	summary := ""
+	if total > contextRecentLimit {
+		limit = contextRecentLimit
+		text, err := ms.summaryText(ctx, conversationID)
+		if err != nil {
+			return nil, err
+		}
+		summary = text
+	}
+
+	recent, err := ms.recentMessages(ctx, conversationID, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]llm.ChatMessage, 0, len(recent)+1)
+	if summary != "" {
+		out = append(out, llm.ChatMessage{
+			Role:    "system",
+			Content: "以下是这次对话更早内容的摘要，供你参考：\n" + summary,
+		})
+	}
+	for _, m := range recent {
+		out = append(out, llm.ChatMessage{Role: string(m.Role), Content: m.Content})
+	}
+	return out, nil
+}
+
+// summaryText 取会话的摘要正文（没有则空串）。
+func (ms *MessageService) summaryText(ctx context.Context, conversationID string) (string, error) {
+	var content string
+	err := ms.db.GetContext(ctx, &content,
+		`SELECT content FROM x_conversation_summaries WHERE conversation_id = ?`, conversationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("查询会话 %s 的摘要: %w", conversationID, err)
+	}
+	return content, nil
+}
+
+// summarizeAsync 异步生成摘要：独立 context（不继承请求 ctx），失败只记日志。
+func (ms *MessageService) summarizeAsync(conversationID, provider string, setting models.ProviderSetting, model string) {
+	ctx, cancel := context.WithTimeout(context.Background(), summaryTimeout)
+	defer cancel()
+
+	if err := ms.refreshSummary(ctx, conversationID, setting, model); err != nil {
+		slog.Warn("生成摘要失败",
+			"conversation_id", conversationID,
+			"service_provider", provider,
+			"err", err,
+		)
+	}
+}
+
+// refreshSummary 按 01-需求 #4 维护摘要：
+//
+//	消息数 < 10 → 跳过
+//	已有摘要且锚点已是最新 assistant → 跳过（避免每次发送都重算）
+//	压缩范围 = 截至最新 assistant 的全部消息（与"最近 10 条"有重叠，
+//	这是有意的取舍：摘要是有损压缩，最近 10 条仍逐字发送，重叠不损失信息）
+//	upsert（uk_x_summary_conversation），锚点 = 最新 assistant 的 id/seq
+func (ms *MessageService) refreshSummary(ctx context.Context, conversationID string, setting models.ProviderSetting, model string) error {
+	var total int
+	if err := ms.db.GetContext(ctx, &total,
+		`SELECT COUNT(*) FROM x_messages WHERE conversation_id = ?`, conversationID); err != nil {
+		return fmt.Errorf("统计消息数: %w", err)
+	}
+	if total < summaryTriggerAt {
+		return nil
+	}
+
+	var last struct {
+		ID  string `db:"id"`
+		Seq int64  `db:"seq"`
+	}
+	if err := ms.db.GetContext(ctx, &last,
+		`SELECT id, seq FROM x_messages WHERE conversation_id = ? AND role = 'assistant' ORDER BY seq DESC LIMIT 1`,
+		conversationID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil // 还没有 assistant 消息
+		}
+		return fmt.Errorf("取最新 assistant 消息: %w", err)
+	}
+
+	var anchorSeq *int64
+	if err := ms.db.GetContext(ctx, &anchorSeq,
+		`SELECT message_seq FROM x_conversation_summaries WHERE conversation_id = ?`, conversationID); err == nil {
+		if anchorSeq != nil && *anchorSeq >= last.Seq {
+			return nil // 已经是最新的
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("查询摘要锚点: %w", err)
+	}
+
+	// 压缩范围：截至最新 assistant 的全部消息
+	older := make([]models.Message, 0, 16)
+	if err := ms.db.SelectContext(ctx, &older,
+		`SELECT `+messageColumns+` FROM x_messages WHERE conversation_id = ? AND seq <= ? ORDER BY seq`,
+		conversationID, last.Seq); err != nil {
+		return fmt.Errorf("查询待摘要的历史: %w", err)
+	}
+	if len(older) == 0 {
+		return nil
+	}
+
+	msgs := make([]llm.ChatMessage, 0, len(older))
+	for _, m := range older {
+		msgs = append(msgs, llm.ChatMessage{Role: string(m.Role), Content: m.Content})
+	}
+
+	text, err := ms.llm.Summarize(ctx, llm.SummarizeRequest{
+		BaseURL:  setting.BaseURL,
+		APIKey:   setting.APIKey,
+		Model:    model,
+		Messages: msgs,
+	})
+	if err != nil {
+		return err
+	}
+	if text == "" {
+		return nil
+	}
+
+	id, err := models.NewUUID()
+	if err != nil {
+		return fmt.Errorf("生成摘要 id: %w", err)
+	}
+	now := time.Now()
+	const upsert = `INSERT INTO x_conversation_summaries
+		(id, conversation_id, content, message_id, message_seq, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(conversation_id) DO UPDATE SET
+			content = excluded.content,
+			message_id = excluded.message_id,
+			message_seq = excluded.message_seq,
+			updated_at = excluded.updated_at`
+	if _, err := ms.db.ExecContext(ctx, upsert, id, conversationID, text, last.ID, last.Seq, now, now); err != nil {
+		return fmt.Errorf("写入摘要: %w", err)
+	}
+	return nil
 }
 
 // recentMessages 取会话最近 limit 条消息，按 seq 升序返回（拼上下文用）。

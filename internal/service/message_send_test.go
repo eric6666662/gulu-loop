@@ -3,6 +3,7 @@ package service_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -426,5 +427,163 @@ func TestSendRetryNoUserBefore(t *testing.T) {
 	var ve *service.ValidationError
 	if !errors.As(err, &ve) || !strings.Contains(ve.Message, "找不到可重试") {
 		t.Fatalf("应为找不到可重试的用户消息，实际 %v", err)
+	}
+}
+
+// echoUpstream 起一个假上游：把收到的 messages 回显成 JSON 放进 delta，便于断言上下文。
+func echoUpstream(t *testing.T) (baseURL string) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		raw := make([]byte, 1<<16)
+		n, _ := r.Body.Read(raw)
+		_ = json.Unmarshal(raw[:n], &body)
+
+		echo, _ := json.Marshal(body.Messages)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`data: {"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":` + fmt.Sprintf("%q", string(echo)) + `},"finish_reason":null}]}` + "\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL + "/v1"
+}
+
+// sentMessages 从"回显型"上游的回复里解出发给上游的上下文。
+func sentMessages(t *testing.T, db *sqlx.DB) []struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+} {
+	t.Helper()
+	var content string
+	if err := db.Get(&content, `SELECT content FROM x_messages WHERE role='assistant' ORDER BY seq DESC LIMIT 1`); err != nil {
+		t.Fatal(err)
+	}
+	var msgs []struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(content), &msgs); err != nil {
+		t.Fatalf("回显内容不是 JSON: %q", content)
+	}
+	return msgs
+}
+
+// TestSendContextShort 消息数 ≤ 10 → 全量历史，不带摘要。
+func TestSendContextShort(t *testing.T) {
+	baseURL := echoUpstream(t)
+	db := newSendDB(t)
+	seedConversation(t, db, baseURL, "sk-good")
+	seedThread(t, db) // 4 条
+	svc := service.NewMessageService(db, llm.NewClient())
+
+	if err := svc.Send(context.Background(), service.SendRequest{ConversationID: "c1", Content: "第五问"}, func(service.SendEvent) error { return nil }); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	sent := sentMessages(t, db)
+	if len(sent) != 5 {
+		t.Fatalf("应把 5 条历史全发出去，实际 %d 条: %+v", len(sent), sent)
+	}
+	for _, m := range sent {
+		if m.Role == "system" {
+			t.Fatalf("≤10 条时不应带摘要: %+v", sent)
+		}
+	}
+}
+
+// TestSendContextWithSummary 消息数 > 10 → 摘要（system）+ 最近 10 条。
+func TestSendContextWithSummary(t *testing.T) {
+	baseURL := echoUpstream(t)
+	db := newSendDB(t)
+	seedConversation(t, db, baseURL, "sk-good")
+
+	// 12 条历史
+	for i := 1; i <= 12; i++ {
+		role := "user"
+		if i%2 == 0 {
+			role = "assistant"
+		}
+		if _, err := db.Exec(`INSERT INTO x_messages (id,conversation_id,seq,role,content) VALUES (?,?,?,?,?)`,
+			fmt.Sprintf("h%d", i), "c1", i, role, fmt.Sprintf("历史第%d条", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`UPDATE x_conversations SET message_count=12 WHERE id='c1'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO x_conversation_summaries (id,conversation_id,content,message_id,message_seq)
+		VALUES ('s1','c1','早期聊了泛型与切片', 'h12', 12)`); err != nil {
+		t.Fatal(err)
+	}
+	svc := service.NewMessageService(db, llm.NewClient())
+
+	if err := svc.Send(context.Background(), service.SendRequest{ConversationID: "c1", Content: "新问题"}, func(service.SendEvent) error { return nil }); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	sent := sentMessages(t, db)
+	if len(sent) != 11 { // 1 条摘要 + 最近 10 条（含刚插入的"新问题"）
+		t.Fatalf("应为 1 摘要 + 10 条消息，实际 %d 条: %+v", len(sent), sent)
+	}
+	if sent[0].Role != "system" || !strings.Contains(sent[0].Content, "早期聊了泛型与切片") {
+		t.Fatalf("第一条应为摘要 system 消息: %+v", sent[0])
+	}
+	if sent[len(sent)-1].Content != "新问题" {
+		t.Fatalf("最后一条应是当前问题: %+v", sent[len(sent)-1])
+	}
+}
+
+// TestSummaryTriggeredAfter10 第 10 条 assistant 落库后异步生成摘要；锚点=最新 assistant；重复触发是 upsert。
+func TestSummaryTriggeredAfter10(t *testing.T) {
+	baseURL := echoUpstream(t)
+	db := newSendDB(t)
+	seedConversation(t, db, baseURL, "sk-good")
+	svc := service.NewMessageService(db, llm.NewClient())
+	ctx := context.Background()
+
+	// 连发 5 轮 = 10 条消息
+	for i := 0; i < 5; i++ {
+		if err := svc.Send(ctx, service.SendRequest{ConversationID: "c1", Content: fmt.Sprintf("问%d", i)}, func(service.SendEvent) error { return nil }); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+	}
+
+	// 异步摘要：轮询等它落库
+	var count int
+	for i := 0; i < 40; i++ {
+		_ = db.Get(&count, `SELECT COUNT(*) FROM x_conversation_summaries WHERE conversation_id='c1'`)
+		if count > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if count != 1 {
+		t.Fatalf("第 10 条后应生成 1 条摘要，实际 %d", count)
+	}
+
+	var lastAssistantID string
+	var lastAssistantSeq int64
+	if err := db.Get(&lastAssistantID, `SELECT id FROM x_messages WHERE conversation_id='c1' AND role='assistant' ORDER BY seq DESC LIMIT 1`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Get(&lastAssistantSeq, `SELECT seq FROM x_messages WHERE id=?`, lastAssistantID); err != nil {
+		t.Fatal(err)
+	}
+	var anchorID *string
+	var anchorSeq *int64
+	if err := db.QueryRow(`SELECT message_id, message_seq FROM x_conversation_summaries WHERE conversation_id='c1'`).Scan(&anchorID, &anchorSeq); err != nil {
+		t.Fatal(err)
+	}
+	if anchorID == nil || *anchorID != lastAssistantID || anchorSeq == nil || *anchorSeq != lastAssistantSeq {
+		t.Fatalf("摘要锚点应是最新 assistant（%s/%d），实际 %v/%v", lastAssistantID, lastAssistantSeq, anchorID, anchorSeq)
+	}
+	if count != 1 {
+		t.Fatalf("重复触发应是 upsert，实际 %d 行", count)
 	}
 }

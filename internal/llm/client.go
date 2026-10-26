@@ -136,6 +136,42 @@ type StreamEvent struct {
 	Usage         *Usage
 }
 
+// SummarizeRequest 是一次摘要请求。
+type SummarizeRequest struct {
+	BaseURL  string
+	APIKey   string
+	Model    string
+	Messages []ChatMessage // 要压缩的历史消息
+}
+
+// summarySystemPrompt 摘要用的 system prompt（01-需求 开放问题，本轮定稿）。
+//
+// 目标：把"早期对话"压成能接续的上下文，而不是复述内容。
+const summarySystemPrompt = `你是对话摘要助手。把下面的对话压缩成简洁的中文摘要，只保留：
+1) 用户的目标与约束；2) 已经达成的结论或决定；3) 还没解决的问题。
+不要复述代码，不要寒暄，不要加标题，200 字以内。`
+
+// Summarize 把一段历史压成摘要（复用 Stream，把 delta 累加起来）。
+func (c *Client) Summarize(ctx context.Context, req SummarizeRequest) (string, error) {
+	msgs := make([]ChatMessage, 0, len(req.Messages)+1)
+	msgs = append(msgs, ChatMessage{Role: "system", Content: summarySystemPrompt})
+	msgs = append(msgs, req.Messages...)
+
+	var b strings.Builder
+	if _, err := c.Stream(ctx, StreamRequest{
+		BaseURL:  req.BaseURL,
+		APIKey:   req.APIKey,
+		Model:    req.Model,
+		Messages: msgs,
+	}, func(e StreamEvent) error {
+		b.WriteString(e.Delta)
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(b.String()), nil
+}
+
 // Stream 发起一次流式 Chat Completions，把增量逐段交给 onEvent。
 //
 // 行为约定（02-后端设计.md §1.3 / §3.2）：
