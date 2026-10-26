@@ -1,0 +1,18 @@
+# 咕噜 · 版本控制排除项（2026-10-26 初始化）
+
+# 工具产物：AI 技能目录不入库（只提交代码与 docs/）
+.agents/
+.idea/
+.DS_Store
+
+# 依赖：前端依赖不提交（用 npm ci 还原）
+node_modules/
+web/node_modules/
+
+# 构建产物：二进制不提交
+/gulu
+/gulu.exe
+
+# 临时文件
+*.log
+123.png
