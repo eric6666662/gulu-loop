@@ -110,3 +110,26 @@ describe('ChatArea · 导出与复制', () => {
     w.unmount()
   })
 })
+
+describe('ChatArea · 无服务商', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('没有可用服务商时显示横幅，且输入区禁用', async () => {
+    vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
+
+    const w = mount(ChatArea, { props: { conversationId: 'c1', title: 't', canSend: false } })
+    await flushPromises()
+
+    expect(w.text()).toContain('还没有可用的服务商')
+    expect(w.find('[data-composer-textarea]').attributes('disabled')).toBeDefined()
+  })
+
+  it('有服务商时不显示横幅', async () => {
+    vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
+
+    const w = mount(ChatArea, { props: { conversationId: 'c1', title: 't', canSend: true } })
+    await flushPromises()
+
+    expect(w.text()).not.toContain('还没有可用的服务商')
+  })
+})

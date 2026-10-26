@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import ChatHeader from './ChatHeader.vue'
 import MessageList from './MessageList.vue'
+import ProviderBanner from './ProviderBanner.vue'
 import Composer from './Composer.vue'
 import EditMessageDialog from '../dialog/EditMessageDialog.vue'
 import { useChat } from '../../composables/useChat'
@@ -117,6 +118,8 @@ defineExpose({
       @export="onExport"
       @open-sidebar="emit('open-sidebar')"
     />
+
+    <ProviderBanner v-if="canSend === false" @open-settings="emit('open-settings')" />
 
     <div class="scroll-thin min-h-0 flex-1 overflow-y-auto">
       <MessageList
