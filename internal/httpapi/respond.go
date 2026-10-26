@@ -65,6 +65,11 @@ func (s *Server) badRequest(ctx context.Context, w http.ResponseWriter, message 
 	s.respond(ctx, w, http.StatusBadRequest, message, nil)
 }
 
+// badGateway 上游失败响应：502（LLM 服务商不可达 / 鉴权失败 / 超时）
+func (s *Server) badGateway(ctx context.Context, w http.ResponseWriter, message string) {
+	s.respond(ctx, w, http.StatusBadGateway, message, nil)
+}
+
 // conflict 冲突响应：409（如服务商重名）
 func (s *Server) conflict(ctx context.Context, w http.ResponseWriter, message string) {
 	s.respond(ctx, w, http.StatusConflict, message, nil)

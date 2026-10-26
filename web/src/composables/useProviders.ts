@@ -15,6 +15,7 @@ export interface UseProviders {
   loading: Ref<boolean>
   error: Ref<string>
   load: () => Promise<void>
+  test: (name: string) => Promise<api.ProviderTestResult>
   create: (input: api.ProviderInput) => Promise<Provider>
   update: (name: string, input: api.ProviderInput) => Promise<Provider>
   remove: (name: string) => Promise<void>
@@ -59,6 +60,11 @@ export function useProviders(): UseProviders {
   }
 
   /** 新增：成功后把新服务商并进本地列表（models 自动重算），失败原样抛给页面展示 */
+  /** 检测连通：只调接口并返回结果，弹什么提示由页面决定（失败原因在 ApiError.message 里） */
+  async function test(name: string): Promise<api.ProviderTestResult> {
+    return api.test(name)
+  }
+
   async function create(input: api.ProviderInput): Promise<Provider> {
     const created = await api.create(input)
     providers.value = [...providers.value, created].sort((a, b) =>
@@ -76,5 +82,5 @@ export function useProviders(): UseProviders {
     return updated
   }
 
-  return { providers, models, loading, error, load, create, update, remove }
+  return { providers, models, loading, error, load, test, create, update, remove }
 }

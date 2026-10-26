@@ -82,12 +82,30 @@ describe('ProviderDetail', () => {
     expect(payload?.model).toBe('zzz-1')
   })
 
-  it('点「拉取模型列表」emit fetch-models', async () => {
+  it('点「拉取模型列表」emit fetch-models，带上当前表单的连接信息', async () => {
     const w = mount(ProviderDetail, { props: { provider } })
 
     await w.find('[data-fetch-models]').trigger('click')
 
-    expect(w.emitted('fetch-models')).toHaveLength(1)
+    expect(w.emitted('fetch-models')?.[0]?.[0]).toMatchObject({
+      serviceProvider: 'deepseek',
+      baseUrl: 'https://api.deepseek.com/v1',
+      apiKey: '',
+    })
+  })
+
+  it('addModels 追加勾选的模型并去重（展示名缺省 = 标识）', async () => {
+    const w = mount(ProviderDetail, { props: { provider } })
+
+    w.vm.addModels(['deepseek-chat', 'deepseek-v4-pro'])
+    await w.vm.$nextTick()
+
+    const ids = w.findAll('[data-model-id]').map((i) => (i.element as HTMLInputElement).value)
+    expect(ids).toEqual(['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-chat'])
+
+    await w.find('[data-save]').trigger('click')
+    const payload = w.emitted('save')?.[0]?.[0] as { models: { id: string; name: string }[] }
+    expect(payload.models.find((m) => m.id === 'deepseek-chat')?.name).toBe('deepseek-chat')
   })
 
   it('后端错误（重名）显示在表单里', () => {

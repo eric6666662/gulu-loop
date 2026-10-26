@@ -9,7 +9,7 @@ const emit = defineEmits<{
   save: [input: ProviderInput]
   remove: []
   back: []
-  'fetch-models': []
+  'fetch-models': [payload: { serviceProvider: string; baseUrl: string; apiKey: string }]
 }>()
 
 const isNew = computed(() => props.provider === null)
@@ -105,10 +105,22 @@ function setDefault(index: number): void {
 }
 
 function addModel(): void {
-  const id = `model-${form.models.length + 1}`
   form.models.push({ id: '', name: '' })
-  if (!form.model) form.model = id === '' ? '' : form.models[0]?.id ?? ''
 }
+
+/** 拉取弹层确认后回填：追加到清单，重复的跳过，展示名缺省 = 标识 */
+function addModels(ids: string[]): void {
+  const have = new Set(form.models.map((m) => m.id.trim().toLowerCase()))
+  for (const raw of ids) {
+    const id = raw.trim()
+    if (!id || have.has(id.toLowerCase())) continue
+    have.add(id.toLowerCase())
+    form.models.push({ id, name: id })
+  }
+  if (!form.model && form.models.length > 0) form.model = form.models[0].id
+}
+
+defineExpose({ addModels })
 </script>
 
 <template>
@@ -249,7 +261,13 @@ function addModel(): void {
               type="button"
               data-fetch-models
               class="ml-auto flex h-8 items-center gap-2 rounded-md border border-border-strong px-3 text-meta font-medium text-ink transition-colors duration-150 hover:bg-surface-alt"
-              @click="emit('fetch-models')"
+              @click="
+                emit('fetch-models', {
+                  serviceProvider: form.serviceProvider,
+                  baseUrl: form.baseUrl,
+                  apiKey: form.apiKey,
+                })
+              "
             >
               <CloudDownload class="size-4" :stroke-width="1.5" />拉取模型列表
             </button>

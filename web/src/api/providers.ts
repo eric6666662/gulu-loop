@@ -46,6 +46,37 @@ export function update(name: string, input: ProviderInput): Promise<Provider> {
   })
 }
 
+/** 检测连通结果（#15） */
+export interface ProviderTestResult {
+  ok: boolean
+  latencyMs: number
+  modelCount: number
+}
+
+/** 拉取模型列表请求（#14）：编辑态 apiKey 留空 = 用库里的密钥 */
+export interface FetchModelsInput {
+  serviceProvider?: string
+  baseUrl: string
+  apiKey?: string
+}
+
+/** 检测连通：只读，不落库（02-后端设计.md §1.8） */
+export function test(name: string): Promise<ProviderTestResult> {
+  return request<ProviderTestResult>(
+    `/api/v1/service-providers/${encodeURIComponent(name)}/test`,
+    { method: 'POST' },
+  )
+}
+
+/** 拉取上游模型标识；只把 models 数组交给调用方（不落库） */
+export async function fetchModels(input: FetchModelsInput): Promise<string[]> {
+  const data = await request<{ models: string[] }>('/api/v1/service-providers/models:fetch', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+  return data.models
+}
+
 export function remove(name: string): Promise<void> {
   return request<void>(`/api/v1/service-providers/${encodeURIComponent(name)}`, { method: 'DELETE' })
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"gululoop/internal/dal/models"
+	"gululoop/internal/llm"
 	"gululoop/internal/service"
 )
 
@@ -154,6 +155,85 @@ type renameConversationReq struct {
 	Title string `json:"title"` // 会话标题
 }
 
+// fetchModelsReq 拉取模型列表请求体（#14）：新建态用 body 里的凭证，编辑态 apiKey 留空用库里的。
+type fetchModelsReq struct {
+	ServiceProvider string `json:"serviceProvider"`
+	BaseURL         string `json:"baseUrl"`
+	APIKey          string `json:"apiKey"`
+}
+
+// modelsResponse 拉取模型列表的 data
+type modelsResponse struct {
+	Models []string `json:"models"`
+}
+
+// fetchProviderModels 从上游拉取模型列表（只读，不落库）
+//
+//	POST /api/v1/service-providers/models:fetch
+//	请求：{serviceProvider?, baseUrl, apiKey?}；响应 data：{models:[id,…]}
+//	错误：400（body 非 JSON / baseUrl 空 / 既无 apiKey 又无 serviceProvider）、404 服务商不存在、502 上游失败
+func (s *Server) fetchProviderModels(w http.ResponseWriter, r *http.Request) {
+	var req fetchModelsReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.badRequest(r.Context(), w, "请求体格式错误")
+		return
+	}
+
+	baseURL := strings.TrimSpace(req.BaseURL)
+	if baseURL == "" {
+		s.badRequest(r.Context(), w, "baseUrl 不能为空")
+		return
+	}
+
+	apiKey := strings.TrimSpace(req.APIKey)
+	if apiKey == "" {
+		name := strings.TrimSpace(req.ServiceProvider)
+		if name == "" {
+			s.badRequest(r.Context(), w, "请先填写 apiKey")
+			return
+		}
+		key, err := s.provider.ResolveAPIKey(r.Context(), name)
+		if err != nil {
+			s.writeProviderError(w, r, err, "读取服务商密钥")
+			return
+		}
+		apiKey = key
+	}
+
+	models, err := s.provider.FetchModels(r.Context(), baseURL, apiKey)
+	if err != nil {
+		s.writeProviderError(w, r, err, "拉取模型列表")
+		return
+	}
+	s.ok(r.Context(), w, modelsResponse{Models: models})
+}
+
+// testServiceProvider 检测连通（#15）：用库内配置调一次上游 /models
+//
+//	POST /api/v1/service-providers/{name}/test
+//	响应 data：{ok, latencyMs, modelCount}；错误：400 缺名称 / 404 不存在 / 502 上游失败
+func (s *Server) testServiceProvider(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		s.badRequest(r.Context(), w, "缺少服务商名称")
+		return
+	}
+
+	result, err := s.provider.Test(r.Context(), name)
+	if err != nil {
+		s.writeProviderError(w, r, err, "检测服务商连通")
+		return
+	}
+	s.ok(r.Context(), w, result)
+}
+
+// isUpstreamError 判断是不是上游失败（llm 包的错误类型）。用 As 而不是类型断言，
+// 这样将来包一层 fmt.Errorf("…: %w") 也不会漏。
+func isUpstreamError(err error) bool {
+	var ue *llm.UpstreamError
+	return errors.As(err, &ue)
+}
+
 // ===================== 消息管理（会话子资源） =====================
 
 // messagesResponse 消息列表的 data 结构
@@ -292,6 +372,9 @@ func (s *Server) writeProviderError(w http.ResponseWriter, r *http.Request, err 
 		s.conflict(ctx, w, err.Error())
 	case errors.Is(err, sql.ErrNoRows):
 		s.notFound(ctx, w, "服务商不存在")
+	case isUpstreamError(err):
+		// 上游失败统一 502，原因放 message（可直出），不细分 401/404/504（02-后端设计.md §1.7）
+		s.badGateway(ctx, w, err.Error())
 	default:
 		slog.Error(action+"失败",
 			"request_id", middleware.GetReqID(ctx),

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"gululoop/internal/dal/models"
+	"gululoop/internal/llm"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -61,11 +62,55 @@ var ErrProviderExists = errors.New("服务商已存在")
 // 存储仍是 x_service_provider.setting_json（ADR-0005），编解码只走
 // models.ProviderSetting；对外一律 ProviderView（camelCase、无 api_key）。
 type ProviderService struct {
-	db *sqlx.DB
+	db  *sqlx.DB
+	llm *llm.Client
 }
 
-func NewProviderService(db *sqlx.DB) *ProviderService {
-	return &ProviderService{db: db}
+func NewProviderService(db *sqlx.DB, llmClient *llm.Client) *ProviderService {
+	return &ProviderService{db: db, llm: llmClient}
+}
+
+// ProviderTestResult 是 #15 检测连通的结果。
+type ProviderTestResult struct {
+	OK         bool  `json:"ok"`
+	LatencyMs  int64 `json:"latencyMs"`
+	ModelCount int   `json:"modelCount"`
+}
+
+// ResolveAPIKey 取已保存服务商的 api_key（#14 编辑态「apiKey 留空」时用）。
+// 不存在返回 sql.ErrNoRows（handler 映射 404）。
+func (ps *ProviderService) ResolveAPIKey(ctx context.Context, name string) (string, error) {
+	setting, err := ps.setting(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	return setting.APIKey, nil
+}
+
+// FetchModels 用给定凭证拉取上游模型标识（#14）。
+//
+// 凭证可以来自请求体（新建态还没落库）或库里的密钥（编辑态留空），由 handler 决定；
+// 上游失败返回 *llm.UpstreamError，handler 统一映射 502。
+func (ps *ProviderService) FetchModels(ctx context.Context, baseURL, apiKey string) ([]string, error) {
+	return ps.llm.FetchModels(ctx, baseURL, apiKey)
+}
+
+// Test 用已保存的配置检测连通（#15）：调一次上游 /models，200 即通。
+// 只读、不写库、不缓存；不存在返回 sql.ErrNoRows，上游失败返回 *llm.UpstreamError。
+func (ps *ProviderService) Test(ctx context.Context, name string) (*ProviderTestResult, error) {
+	setting, err := ps.setting(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+
+	start := time.Now()
+	ids, err := ps.llm.FetchModels(ctx, setting.BaseURL, setting.APIKey)
+	latency := time.Since(start).Milliseconds()
+	if err != nil {
+		return nil, err
+	}
+
+	return &ProviderTestResult{OK: true, LatencyMs: latency, ModelCount: len(ids)}, nil
 }
 
 // List 返回全部服务商，按标识升序（数量是个位数，不分页）。

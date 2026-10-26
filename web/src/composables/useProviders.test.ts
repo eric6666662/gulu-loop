@@ -120,6 +120,16 @@ describe('useProviders', () => {
     expect(providers.value).toEqual([])
   })
 
+  it('test(name) 返回连通结果且不自己弹提示（由页面决定）', async () => {
+    vi.spyOn(api, 'test').mockResolvedValue({ ok: true, latencyMs: 312, modelCount: 8 })
+
+    const { test } = useProviders()
+    const res = await test('deepseek')
+
+    expect(res).toEqual({ ok: true, latencyMs: 312, modelCount: 8 })
+    expect(api.test).toHaveBeenCalledWith('deepseek')
+  })
+
   it('remove 后该服务商的模型从 models 里消失', async () => {
     vi.spyOn(api, 'list').mockResolvedValue([
       provider({ serviceProvider: 'deepseek' }),

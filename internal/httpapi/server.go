@@ -4,7 +4,6 @@ package httpapi
 import (
 	"context"
 	"errors"
-	"gululoop/internal/service"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -13,6 +12,8 @@ import (
 	"time"
 
 	"gululoop/internal/config"
+	"gululoop/internal/llm"
+	"gululoop/internal/service"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -38,7 +39,7 @@ func New(cfg *config.Config, db *sqlx.DB) *Server {
 		cfg:          cfg,
 		conversation: service.NewConversationService(db),
 		message:      service.NewMessageService(db),
-		provider:     service.NewProviderService(db),
+		provider:     service.NewProviderService(db, llm.NewClient()),
 	}
 }
 
@@ -80,6 +81,10 @@ func (s *Server) Handler() http.Handler {
 			r.Post("/service-providers", s.createServiceProvider)
 			r.Put("/service-providers/{name}", s.updateServiceProvider)
 			r.Delete("/service-providers/{name}", s.deleteServiceProvider)
+
+			// 服务商探测：拉取模型列表（新建态用请求体凭证）/ 检测连通（用库内配置）
+			r.Post("/service-providers/models:fetch", s.fetchProviderModels)
+			r.Post("/service-providers/{name}/test", s.testServiceProvider)
 		})
 	})
 

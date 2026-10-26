@@ -5,10 +5,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"gululoop/internal/config"
 	"gululoop/internal/dal"
+	"gululoop/internal/llm"
 	"gululoop/internal/service"
 
 	"github.com/jmoiron/sqlx"
@@ -46,7 +50,7 @@ func validInput() service.ProviderInput {
 // TestProviderCreate 正常新增：返回脱敏视图、模型清单完整、库里存了密钥。
 func TestProviderCreate(t *testing.T) {
 	db := newProviderDB(t)
-	svc := service.NewProviderService(db)
+	svc := service.NewProviderService(db, llm.NewClient())
 
 	got, err := svc.Create(context.Background(), validInput())
 	if err != nil {
@@ -83,7 +87,7 @@ func TestProviderCreate(t *testing.T) {
 // TestProviderCreateDuplicate 重名 → ErrProviderExists。
 func TestProviderCreateDuplicate(t *testing.T) {
 	db := newProviderDB(t)
-	svc := service.NewProviderService(db)
+	svc := service.NewProviderService(db, llm.NewClient())
 	ctx := context.Background()
 
 	if _, err := svc.Create(ctx, validInput()); err != nil {
@@ -117,7 +121,7 @@ func TestProviderValidate(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			db := newProviderDB(t)
-			svc := service.NewProviderService(db)
+			svc := service.NewProviderService(db, llm.NewClient())
 			in := validInput()
 			c.mutate(&in)
 
@@ -136,7 +140,7 @@ func TestProviderValidate(t *testing.T) {
 // TestProviderUpdateKeepsAPIKey 更新时 apiKey 传空串 = 不修改已存密钥。
 func TestProviderUpdateKeepsAPIKey(t *testing.T) {
 	db := newProviderDB(t)
-	svc := service.NewProviderService(db)
+	svc := service.NewProviderService(db, llm.NewClient())
 	ctx := context.Background()
 
 	if _, err := svc.Create(ctx, validInput()); err != nil {
@@ -174,7 +178,7 @@ func TestProviderUpdateKeepsAPIKey(t *testing.T) {
 // TestProviderUpdateNotFound 不存在的服务商 → sql.ErrNoRows（handler 映射 404）。
 func TestProviderUpdateNotFound(t *testing.T) {
 	db := newProviderDB(t)
-	svc := service.NewProviderService(db)
+	svc := service.NewProviderService(db, llm.NewClient())
 
 	_, err := svc.Update(context.Background(), "nope", validInput())
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -185,7 +189,7 @@ func TestProviderUpdateNotFound(t *testing.T) {
 // TestProviderUpdateReplacesAPIKey 传了新 key 就覆盖。
 func TestProviderUpdateReplacesAPIKey(t *testing.T) {
 	db := newProviderDB(t)
-	svc := service.NewProviderService(db)
+	svc := service.NewProviderService(db, llm.NewClient())
 	ctx := context.Background()
 	if _, err := svc.Create(ctx, validInput()); err != nil {
 		t.Fatal(err)
@@ -211,7 +215,7 @@ func TestProviderUpdateReplacesAPIKey(t *testing.T) {
 // TestProviderList 按标识升序；存量字符串数组的 models 也能读出来；永不回传 api_key。
 func TestProviderList(t *testing.T) {
 	db := newProviderDB(t)
-	svc := service.NewProviderService(db)
+	svc := service.NewProviderService(db, llm.NewClient())
 	ctx := context.Background()
 
 	// 存量行：ADR-0005 的旧格式（models 是字符串数组）
@@ -261,7 +265,7 @@ func TestProviderList(t *testing.T) {
 // TestProviderListEmpty 空库返回空切片（不是 nil），序列化为 []。
 func TestProviderListEmpty(t *testing.T) {
 	db := newProviderDB(t)
-	svc := service.NewProviderService(db)
+	svc := service.NewProviderService(db, llm.NewClient())
 
 	list, err := svc.List(context.Background())
 	if err != nil {
@@ -279,7 +283,7 @@ func TestProviderListEmpty(t *testing.T) {
 // TestProviderDelete 删除成功；再删同一个 → sql.ErrNoRows。
 func TestProviderDelete(t *testing.T) {
 	db := newProviderDB(t)
-	svc := service.NewProviderService(db)
+	svc := service.NewProviderService(db, llm.NewClient())
 	ctx := context.Background()
 	if _, err := svc.Create(ctx, validInput()); err != nil {
 		t.Fatal(err)
@@ -301,7 +305,7 @@ func TestProviderDelete(t *testing.T) {
 // TestProviderModelNameDefaults 模型展示名留空 → 落库补成 id。
 func TestProviderModelNameDefaults(t *testing.T) {
 	db := newProviderDB(t)
-	svc := service.NewProviderService(db)
+	svc := service.NewProviderService(db, llm.NewClient())
 
 	in := validInput()
 	in.Models = []service.ModelRef{{ID: "m1"}, {ID: "m2", Name: ""}}
@@ -314,5 +318,129 @@ func TestProviderModelNameDefaults(t *testing.T) {
 		if m.Name != m.ID {
 			t.Fatalf("展示名应补成 id: %+v", m)
 		}
+	}
+}
+
+// fakeModelsUpstream 起一个只实现 GET /v1/models 的假上游。
+func fakeModelsUpstream(t *testing.T, ids []string, status int, body string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		if body != "" {
+			_, _ = w.Write([]byte(body))
+			return
+		}
+		parts := make([]string, 0, len(ids))
+		for _, id := range ids {
+			parts = append(parts, `{"id":"`+id+`","object":"model","created":1,"owned_by":"x"}`)
+		}
+		_, _ = w.Write([]byte(`{"object":"list","data":[` + strings.Join(parts, ",") + `]}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL + "/v1"
+}
+
+// TestResolveAPIKey 编辑态「apiKey 留空」时从库里取密钥。
+func TestResolveAPIKey(t *testing.T) {
+	db := newProviderDB(t)
+	svc := service.NewProviderService(db, llm.NewClient())
+	ctx := context.Background()
+	if _, err := svc.Create(ctx, validInput()); err != nil {
+		t.Fatal(err)
+	}
+
+	key, err := svc.ResolveAPIKey(ctx, "deepseek")
+	if err != nil {
+		t.Fatalf("ResolveAPIKey: %v", err)
+	}
+	if key != "sk-secret-1" {
+		t.Fatalf("密钥不符: %q", key)
+	}
+
+	if _, err := svc.ResolveAPIKey(ctx, "nope"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("不存在的服务商应返回 sql.ErrNoRows，实际 %v", err)
+	}
+}
+
+// TestProviderFetchModels 透传上游模型标识；上游失败映射成 UpstreamError。
+func TestProviderFetchModels(t *testing.T) {
+	db := newProviderDB(t)
+	svc := service.NewProviderService(db, llm.NewClient())
+	ctx := context.Background()
+
+	base := fakeModelsUpstream(t, []string{"deepseek-v4-pro", "deepseek-v4-flash"}, http.StatusOK, "")
+	got, err := svc.FetchModels(ctx, base, "sk-1")
+	if err != nil {
+		t.Fatalf("FetchModels: %v", err)
+	}
+	if len(got) != 2 || got[0] != "deepseek-v4-pro" {
+		t.Fatalf("模型列表不符: %v", got)
+	}
+
+	bad := fakeModelsUpstream(t, nil, http.StatusUnauthorized, `{"error":{"message":"api_key 无效"}}`)
+	_, err = svc.FetchModels(ctx, bad, "sk-bad")
+	var ue *llm.UpstreamError
+	if !errors.As(err, &ue) {
+		t.Fatalf("应为 UpstreamError，实际 %v", err)
+	}
+	if !strings.Contains(ue.Message, "上游返回 401") {
+		t.Fatalf("错误文案不符: %q", ue.Message)
+	}
+}
+
+// TestProviderTest 检测连通：成功返回耗时与模型数；失败走 UpstreamError；不存在走 404。
+func TestProviderTest(t *testing.T) {
+	db := newProviderDB(t)
+	svc := service.NewProviderService(db, llm.NewClient())
+	ctx := context.Background()
+
+	base := fakeModelsUpstream(t, []string{"m1", "m2", "m3"}, http.StatusOK, "")
+	in := validInput()
+	in.BaseURL = base
+	if _, err := svc.Create(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := svc.Test(ctx, "deepseek")
+	if err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	if !res.OK || res.ModelCount != 3 {
+		t.Fatalf("结果不符: %+v", res)
+	}
+	if res.LatencyMs < 0 {
+		t.Fatalf("耗时不应为负: %d", res.LatencyMs)
+	}
+
+	if _, err := svc.Test(ctx, "nope"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("不存在的服务商应返回 sql.ErrNoRows，实际 %v", err)
+	}
+}
+
+// TestProviderTestUpstreamFail 上游 401 → UpstreamError（handler 映射 502）。
+func TestProviderTestUpstreamFail(t *testing.T) {
+	db := newProviderDB(t)
+	svc := service.NewProviderService(db, llm.NewClient())
+	ctx := context.Background()
+
+	base := fakeModelsUpstream(t, nil, http.StatusUnauthorized, `{"error":{"message":"api_key 无效"}}`)
+	in := validInput()
+	in.BaseURL = base
+	if _, err := svc.Create(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := svc.Test(ctx, "deepseek")
+	var ue *llm.UpstreamError
+	if !errors.As(err, &ue) {
+		t.Fatalf("应为 UpstreamError，实际 %v", err)
+	}
+	if !strings.Contains(ue.Message, "api_key 无效") {
+		t.Fatalf("错误文案不符: %q", ue.Message)
 	}
 }

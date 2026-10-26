@@ -1,18 +1,19 @@
 <script setup lang="ts">
-import { inject, ref } from 'vue'
+import { computed, inject, ref } from 'vue'
 import { Plus, X } from 'lucide-vue-next'
 import type { Provider, ProviderInput } from '../../api/providers'
 import type { UseProviders } from '../../composables/useProviders'
 import type { UseSettingsPane } from '../../composables/useSettingsPane'
 import { useToast } from '../../composables/useToast'
 import ConfirmDialog from '../dialog/ConfirmDialog.vue'
+import ModelFetchDialog from '../dialog/ModelFetchDialog.vue'
 import ProviderDetail from './ProviderDetail.vue'
 import ProviderList from './ProviderList.vue'
 import SettingsEmpty from './SettingsEmpty.vue'
 
 const emit = defineEmits<{ back: [] }>()
 
-const { providers, loading, create, update, remove } = inject('providers') as UseProviders
+const { providers, loading, create, update, remove, test } = inject('providers') as UseProviders
 const { step, editing, editProvider, createProvider, backToList } = inject('settingsPane') as UseSettingsPane
 const { push } = useToast()
 
@@ -74,8 +75,33 @@ async function doRemove(): Promise<void> {
   }
 }
 
-// 检测连通在任务 3 接上；先占位不动作
-function onTest(_p: Provider): void {}
+/** 检测连通（#15）：成功/失败都用 toast 反馈，失败用危险样式带上游原因 */
+async function onTest(p: Provider): Promise<void> {
+  try {
+    const res = await test(p.serviceProvider)
+    push(`${p.serviceProvider} 连通正常，${res.latencyMs}ms`)
+  } catch (e) {
+    push(`${p.serviceProvider} 连不上：${message(e)}`, 'danger')
+  }
+}
+
+// ---- 拉取模型列表（#14）：弹层只读，确认后回填到编辑页表单 ----
+const detailRef = ref<InstanceType<typeof ProviderDetail> | null>(null)
+const fetchOpen = ref(false)
+const fetchTarget = ref({ serviceProvider: '', baseUrl: '', apiKey: '' })
+
+const existingIds = computed(() => (editing.value ? editing.value.models.map((m) => m.id) : []))
+
+function onFetchModels(payload: { serviceProvider: string; baseUrl: string; apiKey: string }): void {
+  fetchTarget.value = payload
+  fetchOpen.value = true
+}
+
+function onFetchConfirm(ids: string[]): void {
+  fetchOpen.value = false
+  detailRef.value?.addModels(ids)
+  if (ids.length > 0) push(`已添加 ${ids.length} 个模型`)
+}
 </script>
 
 <template>
@@ -125,12 +151,25 @@ function onTest(_p: Provider): void {}
     <!-- 编辑页 -->
     <ProviderDetail
       v-else
+      ref="detailRef"
       :provider="editing"
       :saving="saving"
       :error="formError"
       @save="onSave"
       @remove="editing && askRemove(editing)"
       @back="onBack"
+      @fetch-models="onFetchModels"
+    />
+
+    <ModelFetchDialog
+      :open="fetchOpen"
+      :provider-name="fetchTarget.serviceProvider || '这个服务商'"
+      :service-provider="fetchTarget.serviceProvider"
+      :base-url="fetchTarget.baseUrl"
+      :api-key="fetchTarget.apiKey"
+      :existing-ids="existingIds"
+      @close="fetchOpen = false"
+      @confirm="onFetchConfirm"
     />
 
     <ConfirmDialog

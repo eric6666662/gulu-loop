@@ -19,7 +19,8 @@
 - ✅ 数据模型（4 张表）、迁移、HTTP 框架与统一信封、日志、静态资源服务（含 SPA 回退）
 - ✅ 服务商：后端四接口（列表/新增/更新/删除）+ 前端设置页（列表 / 编辑 / 删除确认）
 - 🟡 会话与消息：只有"读 + 删"（列表、重命名、删除、消息分页与删除）；新建会话、导出、单条消息内容未实现
-- ❌ **LLM 调用链**（`internal/llm` 为空目录；`openai-go` 尚未引入，见 ADR-0014）、流式发送（NDJSON）、上下文拼接与自动摘要、拉取模型列表、检测连通
+- ✅ LLM 客户端（`internal/llm`，`openai-go` 全封装）：拉取模型列表、检测连通
+- ❌ 流式发送（NDJSON）、上下文拼接与自动摘要
 - ❌ 前端聊天界面：`ChatArea` 是空壳，会话列表未接入
 
 ## 技术栈
@@ -33,7 +34,7 @@
 - 迁移：github.com/pressly/goose/v3 v3.29.0
 - UUID：github.com/google/uuid v1.6.0（UUIDv7）
 - 日志：log/slog + gopkg.in/natefinch/lumberjack.v2 v2.2.1
-- LLM 客户端：**github.com/openai/openai-go（待引入）** —— 决策见 `docs/adr/ADR-0014-use-openai-go.md`，全封装在 `internal/llm`
+- LLM 客户端：github.com/openai/openai-go **v1.12.0**（已引入）—— 决策见 `docs/adr/ADR-0014-use-openai-go.md`，全封装在 `internal/llm`
 
 **前端**（`web/`，产物 `web/dist` 由 `web/embed.go` 嵌入二进制）
 
@@ -107,13 +108,13 @@ README.md                   # 空（待补）
 | 数据模型 & 迁移 | ✅ | 4 张表，UUIDv7，WAL，单连接；`WithTx` 事务样板 |
 | HTTP 框架 | ✅ | chi + 中间件 + 统一信封；静态资源按 MIME 正确返回 + SPA 回退 |
 | 服务商 CRUD（后端） | ✅ | 列表/新增/更新/删除；9 条 400 校验；409 重名；`api_key` 永不回传 |
-| 服务商设置（前端） | ✅ | 列表页 + 编辑页（两级）+ 删除确认 + toast + 校验 |
+| 服务商设置（前端） | ✅ | 列表页 + 编辑页（两级）+ 删除确认 + 拉取模型弹层 + 检测连通 toast + 校验 |
 | 会话管理 | 🟡 部分 | 列表/重命名/删除已实现；**新建会话、导出 Markdown 未实现** |
 | 消息 | 🟡 部分 | 分页列表、删除已实现；**流式发送、单条内容未实现** |
-| LLM 客户端 | ❌ | `internal/llm` 空；`openai-go` 待引入（ADR-0014） |
+| LLM 客户端 | 🟡 部分 | `internal/llm`：`FetchModels` 已实现（`openai-go` v1.12.0，全封装、关重试）；`Stream` / `Summarize` 未实现 |
 | 流式协议（NDJSON） | ❌ | 未实现 |
 | 上下文拼接 / 自动摘要 | ❌ | 未实现 |
-| 拉取模型列表 / 检测连通 | ❌ | 接口 #14 / #15 未实现 |
+| 拉取模型列表 / 检测连通 | ✅ | 接口 #14 / #15 已实现（前端弹层 + ⋯ 菜单） |
 | 前端聊天界面 | ❌ | `ChatArea` 空壳；会话列表未接入 |
 | 测试 | ✅ | Go 26 个测试函数（5 包全绿）；前端 47 个 vitest 用例（9 文件全绿） |
 | 版本控制 | ✅ | `main` → `origin`（2026-10-26 初始化，`.agents/` 与 `node_modules/` 不入库） |
@@ -125,7 +126,7 @@ README.md                   # 空（待补）
 > 本节由 `flow-design-backend` 按 ADR-0014 写入，`/flow-init` 重跑时请保留（上面的「技术栈」段由 `/flow-init` 维护，勿手改）。
 
 - **`github.com/openai/openai-go`**：LLM 客户端 SDK（官方）。**只允许出现在 `internal/llm` 一个包里**，对外只暴露 `Stream` / `FetchModels` / `Summarize` 三个方法与自有类型（全封装，见 `docs/adr/ADR-0014-use-openai-go.md`）。
-- 版本：以 `go get github.com/openai/openai-go` 解析到的当前稳定版为准，**锁进 `go.mod` / `go.sum`**；升级大版本时只改 `internal/llm`。
+- 版本：**v1.12.0**（`go.mod` / `go.sum` 已锁）；升级大版本时只改 `internal/llm`。
 - **必须显式关闭 SDK 的自动重试**（`option.WithMaxRetries(0)`）：流式请求重试会导致上游重复计费与前端拼接回复。重试语义见 `02-后端设计.md` §4。
 - 已知缺口：`reasoning_content`（DeepSeek 思考内容）不在 OpenAI 规范里，需走 SDK 的额外字段逃生舱；不可用时退到「中间件截获原始响应体、第二遍解析」。
 - **不引**：任何 Agent 框架（`langchaingo` / `eino` 等）——agent 循环自己写；也不引各家服务商的独立 SDK（用户可自定义 `base_url`，无法穷举）。
