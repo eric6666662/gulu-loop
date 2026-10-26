@@ -1,10 +1,9 @@
 <script setup lang="ts">
-import { Menu, Pencil } from 'lucide-vue-next'
+import { Menu, Pencil, RefreshCw, Share } from 'lucide-vue-next'
 
-// 会话头（02-ui设计.md ChatHeader）。刷新 / 分享按钮分别在任务 5、9 接入，
-// 现在不渲染，避免出现点了没反应的死按钮。
+// 会话头（02-ui设计.md ChatHeader）：标题 + 刷新 / 编辑标题 / 分享（+ 窄屏 ☰）
 defineProps<{ title: string }>()
-const emit = defineEmits<{ rename: []; 'open-sidebar': [] }>()
+const emit = defineEmits<{ refresh: []; rename: []; export: []; 'open-sidebar': [] }>()
 </script>
 
 <template>
@@ -13,12 +12,30 @@ const emit = defineEmits<{ rename: []; 'open-sidebar': [] }>()
     <div class="ml-auto flex shrink-0 items-center gap-1">
       <button
         type="button"
+        data-refresh
+        class="flex size-8 items-center justify-center rounded-md text-ink-muted transition-colors duration-150 hover:bg-surface-alt hover:text-ink"
+        aria-label="刷新当前会话"
+        @click="emit('refresh')"
+      >
+        <RefreshCw class="size-4" :stroke-width="1.5" />
+      </button>
+      <button
+        type="button"
         data-rename
         class="flex size-8 items-center justify-center rounded-md text-ink-muted transition-colors duration-150 hover:bg-surface-alt hover:text-ink"
         aria-label="编辑会话标题"
         @click="emit('rename')"
       >
         <Pencil class="size-4" :stroke-width="1.5" />
+      </button>
+      <button
+        type="button"
+        data-export
+        class="flex size-8 items-center justify-center rounded-md text-ink-muted transition-colors duration-150 hover:bg-surface-alt hover:text-ink"
+        aria-label="分享会话，下载 Markdown"
+        @click="emit('export')"
+      >
+        <Share class="size-4" :stroke-width="1.5" />
       </button>
       <button
         type="button"

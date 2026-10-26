@@ -19,6 +19,7 @@ const emit = defineEmits<{
   /** 消息级重试（截断重发），与下面 StreamError 的 retry（重拉历史）区分开 */
   'message-retry': [message: Message]
   edit: [message: Message]
+  copy: [message: Message]
   /** StreamError 的「重试」= 重新拉历史 */
   retry: []
   'focus-composer': []
@@ -87,11 +88,13 @@ const errorHint = computed(() =>
           v-else-if="row.message.role === 'user'"
           :message="row.message"
           @edit="emit('edit', row.message)"
+          @copy="emit('copy', row.message)"
         />
         <MessageAssistant
           v-else-if="row.message.role === 'assistant'"
           :message="row.message"
           @retry="emit('message-retry', row.message)"
+          @copy="emit('copy', row.message)"
         />
       </template>
     </template>

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gululoop/internal/dal"
@@ -89,6 +90,76 @@ func (sc *ConversationService) CreateConversation(ctx context.Context) (*models.
 	}
 
 	return sc.GetConversation(ctx, id)
+}
+
+// ExportMarkdown 把整个会话导出成 Markdown（02-后端设计.md §1.4）。
+//
+// 返回文件名与内容；文件名规则：`<title>.md`，标题为空时 `会话-<id 前 8 位>.md`，
+// 非法字符（/ \ : * ? " < > |）替换成下划线。会话不存在返回 sql.ErrNoRows。
+func (sc *ConversationService) ExportMarkdown(ctx context.Context, id string) (string, string, error) {
+	conv, err := sc.GetConversation(ctx, id)
+	if err != nil {
+		return "", "", err
+	}
+
+	msgs := make([]models.Message, 0, 16)
+	const query = `SELECT ` + messageColumns + ` FROM x_messages WHERE conversation_id = ? ORDER BY seq`
+	if err := sc.db.SelectContext(ctx, &msgs, query, id); err != nil {
+		return "", "", fmt.Errorf("查询会话 %s 的消息: %w", id, err)
+	}
+
+	var b strings.Builder
+	title := strings.TrimSpace(conv.Title)
+	if title != "" {
+		fmt.Fprintf(&b, "# %s\n\n", title)
+	} else {
+		fmt.Fprintf(&b, "# 会话-%s\n\n", shortID(id))
+	}
+	fmt.Fprintf(&b, "> 导出时间：%s · %d 条消息\n", time.Now().Format("2006-01-02 15:04"), len(msgs))
+
+	for _, m := range msgs {
+		switch m.Role {
+		case models.RoleUser:
+			b.WriteString("\n## 用户\n\n")
+		case models.RoleAssistant:
+			if m.Model != "" {
+				fmt.Fprintf(&b, "\n## 助手（%s）\n\n", m.Model)
+			} else {
+				b.WriteString("\n## 助手\n\n")
+			}
+		case models.RoleSystem:
+			b.WriteString("\n## 系统\n\n")
+		default:
+			b.WriteString("\n## 工具\n\n")
+		}
+		b.WriteString(m.Content)
+		b.WriteString("\n")
+	}
+
+	return exportFilename(title, id), b.String(), nil
+}
+
+// shortID 取 id 前 8 位（文件名兜底用）。
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+
+// exportFilename 生成导出文件名：标题优先，空标题用 id；非法字符替换成下划线。
+func exportFilename(title, id string) string {
+	name := title
+	if name == "" {
+		name = "会话-" + shortID(id)
+	}
+	name = strings.Map(func(r rune) rune {
+		if strings.ContainsRune(`/\:*?"<>|`, r) {
+			return '_'
+		}
+		return r
+	}, name)
+	return name + ".md"
 }
 
 // GetConversation 按 id 查单条会话；不存在时返回 sql.ErrNoRows（由 handler 映射成 404）。

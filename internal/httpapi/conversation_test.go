@@ -194,3 +194,117 @@ func TestDeleteConversationCascade(t *testing.T) {
 		t.Fatalf("重复删除应为 404，实际 %d %+v", code, env)
 	}
 }
+
+// TestExportConversation 导出 Markdown：含标题、条数、用户/助手小节与模型落款。
+func TestExportConversation(t *testing.T) {
+	srv, db := newConversationTestServer(t)
+
+	if _, err := db.Exec(`INSERT INTO x_conversations (id,title,message_count) VALUES ('c1','快速排序的 Go 泛型版本',2)`); err != nil {
+		t.Fatal(err)
+	}
+	rows := []struct {
+		id, role, content, model string
+		seq                      int64
+	}{
+		{"m1", "user", "帮我把快速排序改成 Go 泛型版", "", 1},
+		{"m2", "assistant", "泛型版要把元素类型和比较函数一起参数化：\n\n```go\nfunc QuickSort[T any](s []T) []T { return s }\n```", "kimi-k2", 2},
+	}
+	for _, r := range rows {
+		if _, err := db.Exec(`INSERT INTO x_messages (id,conversation_id,seq,role,content,model) VALUES (?,?,?,?,?,?)`,
+			r.id, "c1", r.seq, r.role, r.content, r.model); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	code, env := doJSON(t, http.MethodGet, srv.URL+"/api/v1/conversations/c1/export", "")
+	if code != http.StatusOK {
+		t.Fatalf("应为 200，实际 %d %+v", code, env)
+	}
+
+	var got struct {
+		Filename string `json:"filename"`
+		Content  string `json:"content"`
+	}
+	if err := json.Unmarshal(env.Data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Filename != "快速排序的 Go 泛型版本.md" {
+		t.Fatalf("文件名不符: %q", got.Filename)
+	}
+	for _, want := range []string{
+		"# 快速排序的 Go 泛型版本",
+		"2 条消息",
+		"## 用户",
+		"## 助手（kimi-k2）",
+		"func QuickSort[T any]",
+	} {
+		if !strings.Contains(got.Content, want) {
+			t.Fatalf("导出内容缺少 %q：\n%s", want, got.Content)
+		}
+	}
+
+	// 不存在的会话 → 404
+	if code, env = doJSON(t, http.MethodGet, srv.URL+"/api/v1/conversations/nope/export", ""); code != http.StatusNotFound {
+		t.Fatalf("应为 404，实际 %d %+v", code, env)
+	}
+}
+
+// TestExportFilenameFallback 标题为空 → 用会话 id 前 8 位；非法字符替换成下划线。
+func TestExportFilenameFallback(t *testing.T) {
+	srv, db := newConversationTestServer(t)
+
+	if _, err := db.Exec(`INSERT INTO x_conversations (id,title,message_count) VALUES ('abcdef12-3456-7890-abcd-ef1234567890','',0)`); err != nil {
+		t.Fatal(err)
+	}
+	_, env := doJSON(t, http.MethodGet, srv.URL+"/api/v1/conversations/abcdef12-3456-7890-abcd-ef1234567890/export", "")
+	var got struct {
+		Filename string `json:"filename"`
+	}
+	_ = json.Unmarshal(env.Data, &got)
+	if got.Filename != "会话-abcdef12.md" {
+		t.Fatalf("空标题文件名不符: %q", got.Filename)
+	}
+
+	if _, err := db.Exec(`INSERT INTO x_conversations (id,title,message_count) VALUES ('c2','a/b:c*d?e"f<g>h|i',0)`); err != nil {
+		t.Fatal(err)
+	}
+	_, env = doJSON(t, http.MethodGet, srv.URL+"/api/v1/conversations/c2/export", "")
+	_ = json.Unmarshal(env.Data, &got)
+	if strings.ContainsAny(strings.TrimSuffix(got.Filename, ".md"), `/\:*?"<>|`) {
+		t.Fatalf("文件名仍含非法字符: %q", got.Filename)
+	}
+}
+
+// TestGetMessageContent 单条消息内容：返回 {content}；不存在 → 404。
+func TestGetMessageContent(t *testing.T) {
+	srv, db := newConversationTestServer(t)
+
+	if _, err := db.Exec(`INSERT INTO x_conversations (id,title,message_count) VALUES ('c1','t',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO x_messages (id,conversation_id,seq,role,content) VALUES ('m1','c1',1,'assistant','纯文本内容')`); err != nil {
+		t.Fatal(err)
+	}
+
+	code, env := doJSON(t, http.MethodGet, srv.URL+"/api/v1/conversations/c1/messages/m1", "")
+	if code != http.StatusOK {
+		t.Fatalf("应为 200，实际 %d %+v", code, env)
+	}
+	var got struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(env.Data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Content != "纯文本内容" {
+		t.Fatalf("内容不符: %q", got.Content)
+	}
+
+	if code, _ = doJSON(t, http.MethodGet, srv.URL+"/api/v1/conversations/c1/messages/nope", ""); code != http.StatusNotFound {
+		t.Fatalf("应为 404，实际 %d", code)
+	}
+	// 跨会话也取不到
+	if code, _ = doJSON(t, http.MethodGet, srv.URL+"/api/v1/conversations/other/messages/m1", ""); code != http.StatusNotFound {
+		t.Fatalf("跨会话应为 404，实际 %d", code)
+	}
+}

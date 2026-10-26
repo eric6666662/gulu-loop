@@ -60,3 +60,14 @@ describe('MessageAssistant · 操作组', () => {
     expect(w.emitted('retry')).toHaveLength(1)
   })
 })
+
+describe('MessageAssistant · 复制', () => {
+  it('点「复制」emit copy', async () => {
+    const w = mount(MessageAssistant, { props: { message: msg } })
+    await flushPromises()
+
+    await w.find('[data-copy]').trigger('click')
+
+    expect(w.emitted('copy')).toHaveLength(1)
+  })
+})

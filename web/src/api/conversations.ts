@@ -39,3 +39,13 @@ export function rename(id: string, title: string): Promise<Conversation> {
 export function remove(id: string): Promise<void> {
   return request<void>(`/api/v1/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
+
+/** 导出会话（#9）：返回 JSON，前端自己造 Blob 下载 */
+export interface ExportResult {
+  filename: string
+  content: string
+}
+
+export function exportMarkdown(id: string): Promise<ExportResult> {
+  return request<ExportResult>(`/api/v1/conversations/${encodeURIComponent(id)}/export`)
+}

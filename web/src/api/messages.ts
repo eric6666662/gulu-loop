@@ -95,3 +95,11 @@ export function send(
 
   return { abort: () => controller.abort(), done }
 }
+
+/** 单条消息的纯文本内容（#8 复制） */
+export async function content(convId: string, messageId: string): Promise<string> {
+  const data = await request<{ content: string }>(
+    `/api/v1/conversations/${encodeURIComponent(convId)}/messages/${encodeURIComponent(messageId)}`,
+  )
+  return data.content
+}

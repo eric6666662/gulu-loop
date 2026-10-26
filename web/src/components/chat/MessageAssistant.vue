@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
-import { RefreshCw } from 'lucide-vue-next'
+import { Copy, RefreshCw } from 'lucide-vue-next'
 import type { Message } from '../../api/messages'
 import { renderMarkdown } from '../../lib/markdown'
 import { relativeTime } from '../../lib/format'
 
 // 助手消息：无气泡、无边框，只有正文 + 落款行（02-ui设计.md MessageAssistant）
 const props = defineProps<{ message: Message }>()
-const emit = defineEmits<{ retry: [] }>()
+const emit = defineEmits<{ retry: []; copy: [] }>()
 
 const html = ref('')
 
@@ -50,6 +50,15 @@ async function onCopyCode(e: MouseEvent): Promise<void> {
           @click="emit('retry')"
         >
           <RefreshCw class="size-4" :stroke-width="1.5" />
+        </button>
+        <button
+          type="button"
+          data-copy
+          aria-label="复制这条回复"
+          class="flex size-7 items-center justify-center rounded-sm text-ink-muted transition-colors duration-150 hover:bg-surface-alt hover:text-ink"
+          @click="emit('copy')"
+        >
+          <Copy class="size-4" :stroke-width="1.5" />
         </button>
       </div>
       <time class="text-caption text-ink-muted">{{ relativeTime(message.createdAt) }}</time>

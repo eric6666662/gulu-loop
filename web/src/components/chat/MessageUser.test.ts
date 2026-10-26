@@ -35,3 +35,13 @@ describe('MessageUser', () => {
     expect(w.emitted('edit')).toHaveLength(1)
   })
 })
+
+describe('MessageUser · 复制', () => {
+  it('点「复制」emit copy', async () => {
+    const w = mount(MessageUser, { props: { message: msg } })
+
+    await w.find('[data-copy]').trigger('click')
+
+    expect(w.emitted('copy')).toHaveLength(1)
+  })
+})

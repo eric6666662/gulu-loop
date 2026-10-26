@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import ChatArea from './ChatArea.vue'
 import * as api from '../../api/messages'
+import * as conversationApi from '../../api/conversations'
 
 describe('ChatArea', () => {
   afterEach(() => vi.restoreAllMocks())
@@ -69,6 +70,43 @@ describe('ChatArea · 重试与编辑', () => {
     await dialog.find('[data-save]').trigger('click')
 
     expect(sendSpy.mock.calls[0][1]).toMatchObject({ messageId: 'm1', content: '改过的问题' })
+    w.unmount()
+  })
+})
+
+describe('ChatArea · 导出与复制', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  const thread = [
+    { id: 'm1', conversationId: 'c1', seq: 1, role: 'user', content: '第一问', serviceProvider: '', model: '', thinkingContent: '', thinkingDuration: 0, createdAt: '2026-10-26T10:00:00Z', updatedAt: '' },
+    { id: 'm2', conversationId: 'c1', seq: 2, role: 'assistant', content: '第一答', serviceProvider: 'deepseek', model: 'deepseek-v4-pro', thinkingContent: '', thinkingDuration: 0, createdAt: '2026-10-26T10:01:00Z', updatedAt: '' },
+  ] as never
+
+  it('点分享 → 调导出接口（拿 JSON 造 Blob）', async () => {
+    vi.spyOn(api, 'list').mockResolvedValue({ list: thread, hasMore: false })
+    const exportSpy = vi
+      .spyOn(conversationApi, 'exportMarkdown')
+      .mockResolvedValue({ filename: '会话.md', content: '# 标题' })
+
+    const w = mount(ChatArea, { props: { conversationId: 'c1', title: 't' }, attachTo: document.body })
+    await flushPromises()
+    await w.find('[data-export]').trigger('click')
+    await flushPromises()
+
+    expect(exportSpy).toHaveBeenCalledWith('c1')
+    w.unmount()
+  })
+
+  it('点助手消息的「复制」→ 调单条内容接口', async () => {
+    vi.spyOn(api, 'list').mockResolvedValue({ list: thread, hasMore: false })
+    const contentSpy = vi.spyOn(api, 'content').mockResolvedValue('第一答')
+
+    const w = mount(ChatArea, { props: { conversationId: 'c1', title: 't' }, attachTo: document.body })
+    await flushPromises()
+    await w.findAll('[data-copy]')[1].trigger('click') // 第二条 = assistant
+    await flushPromises()
+
+    expect(contentSpy).toHaveBeenCalledWith('c1', 'm2')
     w.unmount()
   })
 })

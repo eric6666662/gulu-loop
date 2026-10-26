@@ -458,6 +458,20 @@ func (ms *MessageService) ListMessages(ctx context.Context, conversationID strin
 	return list, len(list) == limit, nil
 }
 
+// GetMessageContent 取单条消息的纯文本内容（#8 复制用）。
+// 消息不存在或不属于该会话 → sql.ErrNoRows。
+func (ms *MessageService) GetMessageContent(ctx context.Context, conversationID, messageID string) (string, error) {
+	var content string
+	const query = `SELECT content FROM x_messages WHERE conversation_id = ? AND id = ?`
+	if err := ms.db.GetContext(ctx, &content, query, conversationID, messageID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", sql.ErrNoRows
+		}
+		return "", fmt.Errorf("查询消息 %s: %w", messageID, err)
+	}
+	return content, nil
+}
+
 // DeleteMessage 删除会话内一条消息，并维护派生数据。
 //
 // 三件事必须同生共死，因此包在 dal.WithTx 里：

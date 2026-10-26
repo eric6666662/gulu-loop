@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { Pencil } from 'lucide-vue-next'
+import { Copy, Pencil } from 'lucide-vue-next'
 import type { Message } from '../../api/messages'
 
 // 用户消息：整页唯一带底色的内容块（02-ui设计.md MessageUser）
 defineProps<{ message: Message }>()
-const emit = defineEmits<{ edit: [] }>()
+const emit = defineEmits<{ edit: []; copy: [] }>()
 </script>
 
 <template>
@@ -25,6 +25,15 @@ const emit = defineEmits<{ edit: [] }>()
           @click="emit('edit')"
         >
           <Pencil class="size-4" :stroke-width="1.5" />
+        </button>
+        <button
+          type="button"
+          data-copy
+          aria-label="复制这条消息"
+          class="flex size-7 items-center justify-center rounded-sm text-ink-muted transition-colors duration-150 hover:bg-surface-alt hover:text-ink"
+          @click="emit('copy')"
+        >
+          <Copy class="size-4" :stroke-width="1.5" />
         </button>
       </div>
     </div>

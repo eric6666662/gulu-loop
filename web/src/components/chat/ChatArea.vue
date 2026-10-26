@@ -7,6 +7,10 @@ import EditMessageDialog from '../dialog/EditMessageDialog.vue'
 import { useChat } from '../../composables/useChat'
 import type { Message } from '../../api/messages'
 import type { ProviderModel } from '../../composables/useProviders'
+import * as conversationApi from '../../api/conversations'
+import * as messageApi from '../../api/messages'
+import { downloadText } from '../../lib/download'
+import { useToast } from '../../composables/useToast'
 
 // 会话头 + 消息区 + 输入区。草稿态（conversationId === ''）走默认对话页（01-需求 #5b）。
 const props = defineProps<{
@@ -70,6 +74,34 @@ function onRetry(message: Message): void {
   void retry(message.id)
 }
 
+const { push } = useToast()
+
+/** 分享 = 导出 Markdown 并下载（后端返回 JSON，前端造 Blob） */
+async function onExport(): Promise<void> {
+  if (!props.conversationId) {
+    push('先发一句话再导出', 'danger')
+    return
+  }
+  try {
+    const { filename, content } = await conversationApi.exportMarkdown(props.conversationId)
+    downloadText(filename, content)
+    push(`已导出：${filename}`)
+  } catch (e) {
+    push(`导出失败：${e instanceof Error ? e.message : String(e)}`, 'danger')
+  }
+}
+
+/** 复制单条消息的纯文本（走 #8 单条内容接口，不用渲染后的 HTML） */
+async function onCopy(message: Message): Promise<void> {
+  try {
+    const text = await messageApi.content(props.conversationId, message.id)
+    await navigator.clipboard.writeText(text)
+    push('已复制')
+  } catch {
+    push('复制失败：剪贴板不可用', 'danger')
+  }
+}
+
 defineExpose({
   focusComposer: () => composer.value?.focus(),
   clearComposer: () => composer.value?.clear(),
@@ -78,7 +110,13 @@ defineExpose({
 
 <template>
   <div class="flex min-h-0 flex-1 flex-col">
-    <ChatHeader :title="title" @rename="emit('rename')" @open-sidebar="emit('open-sidebar')" />
+    <ChatHeader
+      :title="title"
+      @refresh="refresh"
+      @rename="emit('rename')"
+      @export="onExport"
+      @open-sidebar="emit('open-sidebar')"
+    />
 
     <div class="scroll-thin min-h-0 flex-1 overflow-y-auto">
       <MessageList
@@ -90,6 +128,7 @@ defineExpose({
         @retry="refresh"
         @message-retry="onRetry"
         @edit="askEdit"
+        @copy="onCopy"
         @focus-composer="composer?.focus()"
         @open-settings="emit('open-settings')"
       />

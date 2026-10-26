@@ -254,6 +254,37 @@ func isUpstreamError(err error) bool {
 	return errors.As(err, &ue)
 }
 
+// exportResponse 导出接口的 data
+type exportResponse struct {
+	Filename string `json:"filename"`
+	Content  string `json:"content"`
+}
+
+// exportConversation 导出会话为 Markdown（JSON 返回，前端造 Blob 下载）
+//
+//	GET /api/v1/conversations/{id}/export；响应 data：{filename, content}
+//	错误：400 缺 id / 404 会话不存在 / 500
+func (s *Server) exportConversation(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		s.badRequest(r.Context(), w, "缺少会话 id")
+		return
+	}
+
+	filename, content, err := s.conversation.ExportMarkdown(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.notFound(r.Context(), w, "会话不存在")
+			return
+		}
+		slog.Error("导出会话失败", "request_id", middleware.GetReqID(r.Context()), "conversation_id", id, "err", err)
+		s.serverError(r.Context(), w, "内部错误，请查看服务端日志")
+		return
+	}
+
+	s.ok(r.Context(), w, exportResponse{Filename: filename, Content: content})
+}
+
 // ===================== 消息管理（会话子资源） =====================
 
 // messagesResponse 消息列表的 data 结构
@@ -457,6 +488,34 @@ func (s *Server) llmTimeout() time.Duration {
 		return s.cfg.LLMTimeout
 	}
 	return 60 * time.Second
+}
+
+// getMessageContent 取单条消息的纯文本内容（#8 复制）
+//
+//	GET /api/v1/conversations/{id}/messages/{messageId}；响应 data：{content}
+//	错误：400 缺参数 / 404 消息不存在 / 500
+func (s *Server) getMessageContent(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	messageID := chi.URLParam(r, "messageId")
+	if id == "" || messageID == "" {
+		s.badRequest(r.Context(), w, "缺少会话 id 或消息 id")
+		return
+	}
+
+	content, err := s.message.GetMessageContent(r.Context(), id, messageID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.notFound(r.Context(), w, "消息不存在")
+			return
+		}
+		slog.Error("查询消息内容失败",
+			"request_id", middleware.GetReqID(r.Context()),
+			"conversation_id", id, "message_id", messageID, "err", err)
+		s.serverError(r.Context(), w, "内部错误，请查看服务端日志")
+		return
+	}
+
+	s.ok(r.Context(), w, map[string]string{"content": content})
 }
 
 // deleteMessage 删除会话内一条消息

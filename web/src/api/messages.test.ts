@@ -66,3 +66,25 @@ describe('api/messages.send', () => {
     await expect(handle.done).resolves.toBeUndefined()
   })
 })
+
+describe('api/messages.content', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('GET 单条消息并取出 content', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ code: 200, message: 'ok', data: { content: '纯文本' } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    )
+
+    const text = await api.content('c1', 'm1')
+
+    expect(text).toBe('纯文本')
+    const [url] = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(url).toBe('/api/v1/conversations/c1/messages/m1')
+  })
+})
