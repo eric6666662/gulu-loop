@@ -314,6 +314,18 @@ func (ms *MessageService) truncateFrom(ctx context.Context, conversationID strin
 	})
 }
 
+// autoTitle 取内容前 20 个**字符**作为会话标题（按 rune 截断，不切坏汉字/emoji）。
+const autoTitleRunes = 20
+
+func autoTitle(content string) string {
+	s := strings.TrimSpace(content)
+	r := []rune(s)
+	if len(r) <= autoTitleRunes {
+		return s
+	}
+	return string(r[:autoTitleRunes])
+}
+
 // appendedMessage 是一次写入的结果（事件里要用 id / seq / 会话总数）。
 type appendedMessage struct {
 	ID    string
@@ -353,6 +365,15 @@ func (ms *MessageService) appendMessage(ctx context.Context, conversationID stri
 		if _, err := tx.ExecContext(ctx, insert, id, conversationID, seq, string(msg.Role), msg.Content,
 			msg.ServiceProvider, msg.Model, msg.ThinkingContent, msg.ThinkingDuration, now, now); err != nil {
 			return fmt.Errorf("写入消息: %w", err)
+		}
+
+		// 首条 user 消息写入时自动生成标题（01-需求 #10）：
+		// 只填空标题，用户手改过的不覆盖；不动 updated_at（那是"元数据变更"的字段）
+		if msg.Role == models.RoleUser {
+			const setTitle = `UPDATE x_conversations SET title = ? WHERE id = ? AND title = ''`
+			if _, err := tx.ExecContext(ctx, setTitle, autoTitle(msg.Content), conversationID); err != nil {
+				return fmt.Errorf("生成会话标题: %w", err)
+			}
 		}
 
 		// 计数增量 +1、时间刷新到这条消息（02-后端设计.md §2 维护契约）

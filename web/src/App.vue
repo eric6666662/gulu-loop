@@ -73,9 +73,14 @@ function onConversationReady(id: string): void {
   select(id)
 }
 
-/** 一轮结束：只改本地列表的消息数与时间，不重拉 */
+/** 一轮结束：先改本地列表的消息数与时间；标题还是空的（新会话）就重拉一次列表 */
 function onChatDone(id: string, messageCount: number): void {
+  const item = list.items.value.find((c) => c.id === id)
   list.touch(id, { messageCount, lastMessageTime: new Date().toISOString() })
+
+  // 后端在首条 user 消息写入时自动生成标题（01-需求 #10），前端拿不到新标题 →
+  // 只有"标题仍为空"这一种情况才重拉列表（顺带把新会话按时间排到最前）
+  if (item && item.title.trim() === '') void list.loadFirstPage()
 }
 
 // ---- 删除会话（确认弹层）----

@@ -587,3 +587,69 @@ func TestSummaryTriggeredAfter10(t *testing.T) {
 		t.Fatalf("重复触发应是 upsert，实际 %d 行", count)
 	}
 }
+
+// TestSendAutoTitle 首条 user 消息写入时自动生成标题（01-需求 #10）。
+func TestSendAutoTitle(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{"长内容截前 20 个字符", "帮我把之前那版快速排序改成 Go 泛型版本，[]int、[]string 都能直接用", "帮我把之前那版快速排序改成 Go 泛型版"},
+		{"短内容全取", "你好", "你好"},
+		{"按 rune 截断不切坏汉字", "一二三四五六七八九十一二三四五六七八九十多余的部分", "一二三四五六七八九十一二三四五六七八九十"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			baseURL, _, _ := sseServer(t, "答")
+			db := newSendDB(t)
+			if _, err := db.Exec(`INSERT INTO x_conversations (id,title,message_count) VALUES ('c1','',0)`); err != nil {
+				t.Fatal(err)
+			}
+			setting := fmt.Sprintf(`{"base_url":%q,"api_key":"sk-good","model":"deepseek-v4-pro","models":[{"id":"deepseek-v4-pro"}]}`, baseURL)
+			if _, err := db.Exec(`INSERT INTO x_service_provider (id, service_provider, setting_json) VALUES ('p1','deepseek',?)`, setting); err != nil {
+				t.Fatal(err)
+			}
+			svc := service.NewMessageService(db, llm.NewClient())
+
+			if err := svc.Send(context.Background(), service.SendRequest{ConversationID: "c1", Content: c.content}, func(service.SendEvent) error { return nil }); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+
+			var title string
+			if err := db.Get(&title, `SELECT title FROM x_conversations WHERE id='c1'`); err != nil {
+				t.Fatal(err)
+			}
+			if title != c.want {
+				t.Fatalf("标题不符:\n got %q\nwant %q", title, c.want)
+			}
+		})
+	}
+}
+
+// TestSendKeepsManualTitle 已有标题（用户手动改过）不被覆盖。
+func TestSendKeepsManualTitle(t *testing.T) {
+	baseURL, _, _ := sseServer(t, "答")
+	db := newSendDB(t)
+	if _, err := db.Exec(`INSERT INTO x_conversations (id,title,message_count) VALUES ('c1','我自己起的标题',0)`); err != nil {
+		t.Fatal(err)
+	}
+	setting := fmt.Sprintf(`{"base_url":%q,"api_key":"sk-good","model":"deepseek-v4-pro","models":[{"id":"deepseek-v4-pro"}]}`, baseURL)
+	if _, err := db.Exec(`INSERT INTO x_service_provider (id, service_provider, setting_json) VALUES ('p1','deepseek',?)`, setting); err != nil {
+		t.Fatal(err)
+	}
+	svc := service.NewMessageService(db, llm.NewClient())
+
+	if err := svc.Send(context.Background(), service.SendRequest{ConversationID: "c1", Content: "这是一句很长很长的话用来测试标题不会被覆盖"}, func(service.SendEvent) error { return nil }); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	var title string
+	if err := db.Get(&title, `SELECT title FROM x_conversations WHERE id='c1'`); err != nil {
+		t.Fatal(err)
+	}
+	if title != "我自己起的标题" {
+		t.Fatalf("手动标题被覆盖了: %q", title)
+	}
+}
