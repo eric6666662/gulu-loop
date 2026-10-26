@@ -336,3 +336,30 @@ describe('useChat · 乐观消息的服务端化', () => {
     expect(ordered.map((m) => m.role)).toEqual(['user', 'assistant'])
   })
 })
+
+describe('useChat · 模型切换', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('setModel 后，send 带上该 model', async () => {
+    vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
+    const spy = fakeSend([{ type: 'done', messageCount: 1 }])
+
+    const { model, setModel, send } = useChat(ref('c1'))
+    setModel('kimi-k2')
+    expect(model.value).toBe('kimi-k2')
+
+    await send('你好')
+
+    expect(spy.mock.calls[0][1]).toMatchObject({ model: 'kimi-k2' })
+  })
+
+  it('没设置 model 时请求体不带 model（用服务商默认）', async () => {
+    vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
+    const spy = fakeSend([{ type: 'done', messageCount: 1 }])
+
+    const { send } = useChat(ref('c1'))
+    await send('你好')
+
+    expect((spy.mock.calls[0][1] as { model?: string }).model).toBeUndefined()
+  })
+})

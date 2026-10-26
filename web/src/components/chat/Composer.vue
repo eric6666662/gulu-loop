@@ -1,9 +1,18 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { ArrowUp, Square } from 'lucide-vue-next'
+import type { ProviderModel } from '../../composables/useProviders'
+import ModelSwitchButton from './ModelSwitchButton.vue'
 
-const props = defineProps<{ streaming: boolean; disabled?: boolean }>()
-const emit = defineEmits<{ send: [text: string]; stop: [] }>()
+const props = defineProps<{
+  streaming: boolean
+  disabled?: boolean
+  /** 可选模型（含所属服务商）；为空时模型按钮禁用 */
+  models?: ProviderModel[]
+  /** 当前模型 */
+  model?: string
+}>()
+const emit = defineEmits<{ send: [text: string]; stop: []; 'update:model': [model: string] }>()
 
 const text = ref('')
 const textarea = ref<HTMLTextAreaElement | null>(null)
@@ -64,6 +73,12 @@ defineExpose({
       ></textarea>
 
       <div class="flex h-10 shrink-0 items-center gap-1 px-3">
+        <ModelSwitchButton
+          :models="props.models ?? []"
+          :model-value="props.model ?? ''"
+          :disabled="props.disabled"
+          @update:model-value="emit('update:model', $event)"
+        />
         <button
           type="button"
           data-primary

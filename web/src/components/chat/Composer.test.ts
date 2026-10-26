@@ -74,3 +74,27 @@ describe('Composer', () => {
     w.unmount()
   })
 })
+
+describe('Composer · 模型按钮', () => {
+  const models = [
+    { id: 'deepseek-v4-pro', name: 'V4 Pro', serviceProvider: 'deepseek' },
+    { id: 'kimi-k2', name: 'kimi-k2', serviceProvider: 'moonshot' },
+  ]
+
+  it('图标栏左侧显示当前模型；选中其它模型 emit update:model', async () => {
+    const w = mount(Composer, { props: { streaming: false, models, model: 'deepseek-v4-pro' } })
+
+    expect(w.find('[data-model-name]').text()).toBe('deepseek-v4-pro')
+
+    await w.find('[data-model-switch]').trigger('click')
+    await w.findAll('[data-model-option]')[1].trigger('click')
+
+    expect(w.emitted('update:model')?.[0]?.[0]).toBe('kimi-k2')
+  })
+
+  it('没有可选模型时模型按钮禁用', () => {
+    const w = mount(Composer, { props: { streaming: false, models: [], model: '' } })
+
+    expect(w.find('[data-model-switch]').attributes('disabled')).toBeDefined()
+  })
+})

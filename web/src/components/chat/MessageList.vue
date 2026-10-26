@@ -28,6 +28,29 @@ const emit = defineEmits<{
 // 后端按 seq 倒序返回，渲染前按 seq 升序（02-后端设计.md #6）
 const ordered = computed(() => [...props.messages].sort((a, b) => a.seq - b.seq))
 
+/**
+ * 渲染行：消息 + 换模型痕迹。
+ *
+ * 痕迹是**派生**的，不额外存状态：相邻两条 assistant 的 model 不同，就在后一条前面
+ * 插一条「已切换到 xxx」（02-ui设计.md ModelSwitchNotice：仅真实切换时出现）。
+ */
+type Row = { kind: 'message'; message: Message } | { kind: 'notice'; model: string; key: string }
+
+const rows = computed<Row[]>(() => {
+  const out: Row[] = []
+  let prevModel = ''
+  for (const m of ordered.value) {
+    if (m.role === 'assistant') {
+      if (prevModel && m.model && m.model !== prevModel) {
+        out.push({ kind: 'notice', model: m.model, key: `notice-${m.id}` })
+      }
+      if (m.model) prevModel = m.model
+    }
+    out.push({ kind: 'message', message: m })
+  }
+  return out
+})
+
 // 两种错误文案（02-ui设计.md StreamError）：拉历史失败 vs 生成中失败
 const errorTitle = computed(() => {
   if (props.errorKind === 'stream') {
@@ -54,9 +77,22 @@ const errorHint = computed(() =>
     />
 
     <template v-else>
-      <template v-for="m in ordered" :key="m.id">
-        <MessageUser v-if="m.role === 'user'" :message="m" @edit="emit('edit', m)" />
-        <MessageAssistant v-else-if="m.role === 'assistant'" :message="m" @retry="emit('message-retry', m)" />
+      <template v-for="row in rows" :key="row.kind === 'message' ? row.message.id : row.key">
+        <div v-if="row.kind === 'notice'" data-model-switch-notice class="my-8 flex items-center gap-3">
+          <span class="h-px flex-1 bg-border"></span>
+          <span class="text-caption text-ink-muted">已切换到 {{ row.model }}</span>
+          <span class="h-px flex-1 bg-border"></span>
+        </div>
+        <MessageUser
+          v-else-if="row.message.role === 'user'"
+          :message="row.message"
+          @edit="emit('edit', row.message)"
+        />
+        <MessageAssistant
+          v-else-if="row.message.role === 'assistant'"
+          :message="row.message"
+          @retry="emit('message-retry', row.message)"
+        />
       </template>
     </template>
 

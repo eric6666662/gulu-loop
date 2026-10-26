@@ -15,6 +15,9 @@ export interface ChatDeps {
 
 export interface UseChat {
   messages: Ref<Message[]>
+  /** 会话内当前选中的模型（切换后后续消息都用它） */
+  model: Ref<string>
+  setModel: (model: string) => void
   status: Ref<ChatStatus>
   error: Ref<string>
   /** 错误来源：load=拉历史失败；stream=生成中失败（两者文案不同） */
@@ -39,6 +42,7 @@ const HISTORY_LIMIT = 50
  */
 export function useChat(conversationId: Ref<string>, deps: ChatDeps = {}): UseChat {
   const messages = ref<Message[]>([])
+  const model = ref('')
   const status = ref<ChatStatus>('idle')
   const error = ref('')
   const errorKind = ref<'load' | 'stream' | ''>('')
@@ -117,7 +121,9 @@ export function useChat(conversationId: Ref<string>, deps: ChatDeps = {}): UseCh
     }
 
     let assistantId = ''
-    handle = api.send(convId, input, (e) => {
+    // 会话内切换过的模型要跟着每一次请求走（没设置就不带，用服务商默认）
+    const payload = model.value ? { ...input, model: model.value } : input
+    handle = api.send(convId, payload, (e) => {
       switch (e.type) {
         case 'start': {
           assistantId = e.assistantMessageId
@@ -229,5 +235,22 @@ export function useChat(conversationId: Ref<string>, deps: ChatDeps = {}): UseCh
     if (status.value === 'streaming') status.value = 'idle'
   }
 
-  return { messages, status, error, errorKind, refresh, send, retry, edit, stop }
+  /** 会话内切换模型：后续消息都用它（01-需求 #9） */
+  function setModel(next: string): void {
+    model.value = next
+  }
+
+  return {
+    messages,
+    model,
+    setModel,
+    status,
+    error,
+    errorKind,
+    refresh,
+    send,
+    retry,
+    edit,
+    stop,
+  }
 }

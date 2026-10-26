@@ -91,3 +91,43 @@ describe('MessageList · 错误文案', () => {
     expect(w.text()).toContain('消息没加载出来：连不上本地服务')
   })
 })
+
+describe('MessageList · 换模型痕迹', () => {
+  it('相邻两条 assistant 模型不同 → 中间插一条「已切换到 xxx」', async () => {
+    const w = mount(MessageList, {
+      props: {
+        messages: [
+          { ...msg(1, 'user', '问一') },
+          { ...msg(2, 'assistant', '答一'), model: 'deepseek-v4-pro' },
+          { ...msg(3, 'user', '问二') },
+          { ...msg(4, 'assistant', '答二'), model: 'kimi-k2' },
+        ],
+        status: 'idle',
+        error: '',
+      },
+    })
+    await flushPromises()
+
+    const notices = w.findAll('[data-model-switch-notice]')
+    expect(notices).toHaveLength(1)
+    expect(notices[0].text()).toContain('已切换到 kimi-k2')
+  })
+
+  it('模型没变就不出现痕迹', async () => {
+    const w = mount(MessageList, {
+      props: {
+        messages: [
+          { ...msg(1, 'user', '问一') },
+          { ...msg(2, 'assistant', '答一'), model: 'kimi-k2' },
+          { ...msg(3, 'user', '问二') },
+          { ...msg(4, 'assistant', '答二'), model: 'kimi-k2' },
+        ],
+        status: 'idle',
+        error: '',
+      },
+    })
+    await flushPromises()
+
+    expect(w.findAll('[data-model-switch-notice]')).toHaveLength(0)
+  })
+})
