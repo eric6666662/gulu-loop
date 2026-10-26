@@ -1,0 +1,21 @@
+@import "tailwindcss";
+@import "./tokens.css";
+
+/* 原型里的手工样式（类名保持一致，见 02-前端设计.md §8） */
+@layer components {
+  .scroll-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border-strong) transparent;
+  }
+  .scroll-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scroll-thin::-webkit-scrollbar-thumb {
+    background-color: var(--color-border-strong);
+    border-radius: 9999px;
+  }
+  .scroll-thin::-webkit-scrollbar-track {
+    background-color: transparent;
+  }
+}
