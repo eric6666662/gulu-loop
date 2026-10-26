@@ -69,6 +69,7 @@ func (s *Server) Handler() http.Handler {
 		r.Route("/v1", func(r chi.Router) {
 			// 会话管理（conversation：重命名 / 删除 / 分页列表）
 			r.Get("/conversations", s.listConversations)
+			r.Post("/conversations", s.createConversation)
 			r.Patch("/conversations/{id}", s.renameConversation)
 			r.Delete("/conversations/{id}", s.deleteConversation)
 

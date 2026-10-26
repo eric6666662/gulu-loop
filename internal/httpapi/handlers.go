@@ -76,6 +76,24 @@ func (s *Server) listConversations(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// createConversation 新建会话
+//
+//	POST /api/v1/conversations（空请求体）；响应 data：models.Conversation
+//	新会话 title=""、messageCount=0、lastMessageTime=null；标题等第一条 user 消息写入时自动生成。
+//	错误：只有 500。
+func (s *Server) createConversation(w http.ResponseWriter, r *http.Request) {
+	conversation, err := s.conversation.CreateConversation(r.Context())
+	if err != nil {
+		slog.Error("新建会话失败",
+			"request_id", middleware.GetReqID(r.Context()),
+			"err", err,
+		)
+		s.serverError(r.Context(), w, "内部错误，请查看服务端日志")
+		return
+	}
+	s.ok(r.Context(), w, conversation)
+}
+
 // renameConversation 重命名会话
 //
 //	PATCH /api/v1/conversations/{id}

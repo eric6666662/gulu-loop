@@ -72,6 +72,25 @@ func normalizePage(page, pageSize int) (int, int) {
 	return page, min(pageSize, maxPageSize)
 }
 
+// CreateConversation 新建一个空会话：标题空串、message_count=0、last_message_time 为 NULL。
+//
+// 标题在第一条 user 消息写入时才自动生成（01-需求 #10，任务 11 实现）。
+func (sc *ConversationService) CreateConversation(ctx context.Context) (*models.Conversation, error) {
+	id, err := models.NewUUID()
+	if err != nil {
+		return nil, fmt.Errorf("生成会话 id: %w", err)
+	}
+
+	now := time.Now()
+	const query = `INSERT INTO x_conversations (id, title, message_count, created_at, updated_at)
+		VALUES (?, '', 0, ?, ?)`
+	if _, err := sc.db.ExecContext(ctx, query, id, now, now); err != nil {
+		return nil, fmt.Errorf("新建会话: %w", err)
+	}
+
+	return sc.GetConversation(ctx, id)
+}
+
 // GetConversation 按 id 查单条会话；不存在时返回 sql.ErrNoRows（由 handler 映射成 404）。
 func (sc *ConversationService) GetConversation(ctx context.Context, id string) (*models.Conversation, error) {
 	var c models.Conversation
