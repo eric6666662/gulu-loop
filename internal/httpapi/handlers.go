@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -299,6 +301,164 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.ok(r.Context(), w, messagesResponse{List: messages, HasMore: hasMore})
+}
+
+// sendMessageReq 发送消息请求体（02-后端设计.md §1.3）
+type sendMessageReq struct {
+	Content   string `json:"content"`   // 用户消息内容（必填）
+	Model     string `json:"model"`     // 可选：覆盖服务商默认模型
+	MessageID string `json:"messageId"` // 截断锚点（重试/编辑，任务 7）
+}
+
+// ndjsonEvent NDJSON 事件（每行一个 JSON）
+type ndjsonEvent struct {
+	Type               string `json:"type"`
+	Content            string `json:"content,omitempty"`
+	ConversationID     string `json:"conversationId,omitempty"`
+	UserMessageID      string `json:"userMessageId,omitempty"`
+	AssistantMessageID string `json:"assistantMessageId,omitempty"`
+	Seq                int64  `json:"seq,omitempty"`
+	Model              string `json:"model,omitempty"`
+	ServiceProvider    string `json:"serviceProvider,omitempty"`
+	MessageCount       int    `json:"messageCount,omitempty"`
+	Message            string `json:"message,omitempty"`
+}
+
+// sendMessage 发送消息并以 NDJSON 流式返回助手回复
+//
+//	POST /api/v1/conversations/{id}/messages
+//	请求：{content, model?, messageId?}；响应：application/x-ndjson
+//	事件：start → delta* → done（失败时为 error）
+//
+// 关键约定（§1.3）：开流前的错误一律 JSON 4xx 且不写流；一旦写出 start，
+// HTTP 状态固定 200，之后所有失败只能走 error 事件。
+func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		s.badRequest(r.Context(), w, "缺少会话 id")
+		return
+	}
+
+	var req sendMessageReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.badRequest(r.Context(), w, "请求体格式错误")
+		return
+	}
+	if req.MessageID != "" {
+		// 任务 7 实现（ADR-0006 的截断语义）；先显式拒绝，避免被当成普通发送
+		s.badRequest(r.Context(), w, "messageId 截断暂未实现")
+		return
+	}
+	if strings.TrimSpace(req.Content) == "" {
+		s.badRequest(r.Context(), w, "content 不能为空")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), s.llmTimeout())
+	defer cancel()
+
+	started := false
+	flusher, _ := w.(http.Flusher)
+	writeEvent := func(e ndjsonEvent) error {
+		if !started {
+			w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			started = true
+		}
+		line, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		if _, err := w.Write(append(line, '\n')); err != nil {
+			return err
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return nil
+	}
+
+	err := s.message.Send(ctx, service.SendRequest{
+		ConversationID: id,
+		Content:        req.Content,
+		Model:          req.Model,
+	}, func(e service.SendEvent) error {
+		// 每种事件只带契约里约定的字段（§1.3），不把内部结构整包透出去
+		switch e.Type {
+		case "start":
+			return writeEvent(ndjsonEvent{
+				Type:               "start",
+				ConversationID:     id,
+				UserMessageID:      e.UserMessageID,
+				AssistantMessageID: e.AssistantMessageID,
+				Seq:                e.Seq,
+				Model:              e.Model,
+				ServiceProvider:    e.ServiceProvider,
+			})
+		case "delta":
+			return writeEvent(ndjsonEvent{Type: "delta", Content: e.Content})
+		default: // done
+			return writeEvent(ndjsonEvent{
+				Type:               "done",
+				AssistantMessageID: e.AssistantMessageID,
+				Seq:                e.Seq,
+				MessageCount:       e.MessageCount,
+			})
+		}
+	})
+	if err == nil {
+		return
+	}
+
+	if !started {
+		s.writeSendError(w, r, err)
+		return
+	}
+
+	// 开流后：只能走 error 事件（HTTP 状态已固定 200）
+	message := err.Error()
+	var ve *service.ValidationError
+	if errors.As(err, &ve) {
+		message = ve.Message
+	}
+	slog.Warn("发送消息中断",
+		"request_id", middleware.GetReqID(ctx),
+		"conversation_id", id,
+		"err", err,
+	)
+	_ = writeEvent(ndjsonEvent{Type: "error", ConversationID: id, Message: message})
+}
+
+// writeSendError 映射开流前的错误（JSON 4xx/5xx，不写流）。
+func (s *Server) writeSendError(w http.ResponseWriter, r *http.Request, err error) {
+	ctx := r.Context()
+
+	var ve *service.ValidationError
+	switch {
+	case errors.As(err, &ve):
+		s.badRequest(ctx, w, ve.Message)
+	case errors.Is(err, service.ErrConversationBusy):
+		s.conflict(ctx, w, err.Error())
+	case errors.Is(err, sql.ErrNoRows):
+		s.notFound(ctx, w, "会话不存在")
+	case isUpstreamError(err):
+		s.badGateway(ctx, w, err.Error())
+	default:
+		slog.Error("发送消息失败",
+			"request_id", middleware.GetReqID(ctx),
+			"conversation_id", chi.URLParam(r, "id"),
+			"err", err,
+		)
+		s.serverError(ctx, w, "内部错误，请查看服务端日志")
+	}
+}
+
+// llmTimeout 取 LLM 超时；配置为零值时回落到 60s（测试里常传空 Config）。
+func (s *Server) llmTimeout() time.Duration {
+	if s.cfg != nil && s.cfg.LLMTimeout > 0 {
+		return s.cfg.LLMTimeout
+	}
+	return 60 * time.Second
 }
 
 // deleteMessage 删除会话内一条消息

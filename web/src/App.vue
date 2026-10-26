@@ -38,15 +38,33 @@ function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
-async function onNewChat(): Promise<void> {
-  try {
-    const created = await list.create()
-    select(created.id)
-    push('已新建会话')
-    sidebarOpen.value = false
-  } catch (e) {
-    push(`新建失败：${message(e)}`, 'danger')
-  }
+const chatArea = ref<InstanceType<typeof ChatArea> | null>(null)
+
+/**
+ * 「新的聊天」是**纯前端**行为（01-需求 #5b）：不发任何请求，
+ * 只把右侧切到草稿对话页 + 清空输入框并聚焦。重复点 = 幂等。
+ */
+function onNewChat(): void {
+  select('')
+  sidebarOpen.value = false
+  chatArea.value?.clearComposer()
+  chatArea.value?.focusComposer()
+}
+
+/** 草稿态首次发送：真正建会话（此时才请求后端） */
+async function ensureConversation(): Promise<string> {
+  const created = await list.create()
+  return created.id
+}
+
+/** 会话刚建好：选中它（列表项已由 list.create 插入） */
+function onConversationReady(id: string): void {
+  select(id)
+}
+
+/** 一轮结束：只改本地列表的消息数与时间，不重拉 */
+function onChatDone(id: string, messageCount: number): void {
+  list.touch(id, { messageCount, lastMessageTime: new Date().toISOString() })
 }
 
 // ---- 删除会话（确认弹层）----
@@ -112,11 +130,16 @@ async function doRename(title: string): Promise<void> {
     <main class="flex min-w-0 flex-1 flex-col bg-canvas">
       <ChatArea
         v-if="settingsPane.pane.value === 'chat'"
+        ref="chatArea"
         :conversation-id="selectedId"
         :title="currentTitle"
+        :ensure-conversation="ensureConversation"
+        :can-send="providers.providers.value.length > 0"
         @rename="renameOpen = true"
         @open-sidebar="sidebarOpen = true"
         @open-settings="settingsPane.openSettings"
+        @conversation-ready="onConversationReady"
+        @done="onChatDone"
       />
       <SettingsView v-else @back="settingsPane.closeSettings" />
     </main>

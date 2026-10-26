@@ -7,12 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
-	defaultAddr      = "127.0.0.1:1112" // 默认只监听本机
-	defaultLogFormat = "json"
-	defaultLogLevel  = "info"
+	defaultAddr       = "127.0.0.1:1112" // 默认只监听本机
+	defaultLLMTimeout = 60 * time.Second // LLM 调用硬超时（01-需求 约束）
+	defaultLogFormat  = "json"
+	defaultLogLevel   = "info"
 )
 
 // Config 全局配置
@@ -22,6 +24,8 @@ type Config struct {
 	LogDir    string // 日志目录
 	LogFormat string // 日志格式 json | text
 	LogLevel  string // 日志级别 debug | info | warn | error
+
+	LLMTimeout time.Duration // LLM 调用硬超时（流式与拉取模型共用）
 }
 
 // def 默认配置
@@ -35,11 +39,12 @@ func def() *Config {
 	dataDir := filepath.Join(homeDir, ".gulu")
 
 	return &Config{
-		Addr:      defaultAddr,
-		DataDir:   dataDir,
-		LogDir:    filepath.Join(dataDir, "logs"),
-		LogFormat: defaultLogFormat,
-		LogLevel:  defaultLogLevel,
+		Addr:       defaultAddr,
+		DataDir:    dataDir,
+		LogDir:     filepath.Join(dataDir, "logs"),
+		LogFormat:  defaultLogFormat,
+		LogLevel:   defaultLogLevel,
+		LLMTimeout: defaultLLMTimeout,
 	}
 }
 
@@ -57,6 +62,7 @@ var ErrHelp = errors.New("help requested")
 //	-log-dir     日志目录（默认 <data-dir>/logs）
 //	-log-format  日志格式 json | text（默认 json）
 //	-log-level   日志级别 debug | info | warn | error（默认 info）
+//	-llm-timeout LLM 调用硬超时（默认 60s；流式与拉取模型共用）
 func parse(args []string) (*Config, error) {
 	base := def()
 
@@ -67,6 +73,7 @@ func parse(args []string) (*Config, error) {
 	logDir := fs.String("log-dir", "", "日志目录（默认 <data-dir>/logs）")
 	logFormat := fs.String("log-format", base.LogFormat, "日志格式 json | text")
 	logLevel := fs.String("log-level", base.LogLevel, "日志级别 debug | info | warn | error")
+	llmTimeout := fs.Duration("llm-timeout", base.LLMTimeout, "LLM 调用硬超时（默认 60s）")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -76,11 +83,12 @@ func parse(args []string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		Addr:      *addr,
-		DataDir:   *dataDir,
-		LogDir:    *logDir,
-		LogFormat: *logFormat,
-		LogLevel:  *logLevel,
+		Addr:       *addr,
+		DataDir:    *dataDir,
+		LogDir:     *logDir,
+		LogFormat:  *logFormat,
+		LogLevel:   *logLevel,
+		LLMTimeout: *llmTimeout,
 	}
 	if cfg.LogDir == "" {
 		cfg.LogDir = filepath.Join(cfg.DataDir, "logs")

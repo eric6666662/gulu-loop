@@ -67,3 +67,27 @@ describe('MessageList', () => {
     expect(texts[1]).toContain('回复')
   })
 })
+
+describe('MessageList · 错误文案', () => {
+  it('生成中失败用「<模型> 调用失败」', () => {
+    const w = mount(MessageList, {
+      props: {
+        messages: [msg(1, 'user', '问'), { ...msg(2, 'assistant', '半截'), model: 'deepseek-v4-pro' }],
+        status: 'error',
+        error: '上游返回 401：api_key 无效',
+        errorKind: 'stream',
+      },
+    })
+
+    expect(w.text()).toContain('deepseek-v4-pro 调用失败：上游返回 401：api_key 无效')
+    expect(w.text()).toContain('这次回复没有写入会话')
+  })
+
+  it('拉历史失败用「消息没加载出来」', () => {
+    const w = mount(MessageList, {
+      props: { messages: [], status: 'error', error: '连不上本地服务', errorKind: 'load' },
+    })
+
+    expect(w.text()).toContain('消息没加载出来：连不上本地服务')
+  })
+})

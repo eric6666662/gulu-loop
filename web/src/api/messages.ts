@@ -1,4 +1,5 @@
-import { request } from './client'
+import { ApiError, request } from './client'
+import { readNdjson, type StreamEvent } from '../lib/ndjson'
 
 export type Role = 'system' | 'user' | 'assistant' | 'tool'
 
@@ -34,4 +35,61 @@ export function list(
   return request<MessagePage>(
     `/api/v1/conversations/${encodeURIComponent(convId)}/messages${qs ? `?${qs}` : ''}`,
   )
+}
+
+export interface SendInput {
+  content: string
+  model?: string
+  messageId?: string
+}
+
+export interface SendHandle {
+  abort: () => void
+  done: Promise<void>
+}
+
+/**
+ * 发送消息（流式）：开流前的错误抛 ApiError（JSON 信封），开流后的事件走 onEvent。
+ *
+ * 返回 { abort, done }：`abort()` 中断本次流；`done` 在流结束（含 abort）后 resolve，
+ * 开流前失败则 reject。调用方不需要自己读 ReadableStream。
+ */
+export function send(
+  convId: string,
+  input: SendInput,
+  onEvent: (e: StreamEvent) => void,
+): SendHandle {
+  const controller = new AbortController()
+
+  const done = (async () => {
+    let res: Response
+    try {
+      res = await fetch(`/api/v1/conversations/${encodeURIComponent(convId)}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+        signal: controller.signal,
+      })
+    } catch (e) {
+      if (e instanceof Error && e.name === 'AbortError') return // 用户主动停止，不算失败
+      throw new ApiError(0, '连不上本地服务，检查 127.0.0.1:1112 是否还在跑')
+    }
+
+    if (!res.ok) {
+      // 开流前的错误一律是 JSON 信封（§1.3）
+      const body = await res.json().catch(() => null)
+      const message =
+        (body as { message?: string } | null)?.message ?? `请求失败：HTTP ${res.status}`
+      throw new ApiError(res.status, message)
+    }
+
+    try {
+      await readNdjson(res, onEvent)
+    } catch (e) {
+      if (e instanceof Error && e.name === 'AbortError') return
+      throw e
+    }
+  })()
+
+  return { abort: () => controller.abort(), done }
 }

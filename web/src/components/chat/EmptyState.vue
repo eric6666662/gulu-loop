@@ -1,11 +1,18 @@
 <script setup lang="ts">
-// 空会话：行动邀请，不是"暂无数据"（docs/设计稿.md §8）
+// 空对话页：行动邀请，不是"暂无数据"（docs/设计稿.md §8）
+//
+// 两种文案、同一套结构与类名（02-ui设计.md v14）：
+//   draft=true  → 草稿态（还没有会话，01-需求 #5b）
+//   draft=false → 已存在的空会话
+defineProps<{ draft?: boolean }>()
 defineEmits<{ 'focus-composer': [] }>()
 </script>
 
 <template>
   <div class="mx-auto w-full max-w-form px-6 pt-12 text-center">
-    <h2 class="text-title font-semibold text-ink">这个会话还是空的</h2>
+    <h2 class="text-title font-semibold text-ink">
+      {{ draft ? '开始新的对话' : '这个会话还是空的' }}
+    </h2>
     <p class="mt-2 text-body text-ink-muted">在下方输入框写第一句，回车发送。</p>
     <button
       type="button"

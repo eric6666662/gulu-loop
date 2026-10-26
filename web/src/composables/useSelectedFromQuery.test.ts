@@ -69,3 +69,29 @@ describe('useSelectedFromQuery', () => {
     pushSpy.mockRestore()
   })
 })
+
+describe('useSelectedFromQuery · 草稿态', () => {
+  it("select('') 进草稿态，且不会被自动回落到第一条", async () => {
+    const items = ref([{ id: 'a' }, { id: 'b' }])
+    const { io, written } = fakeIO(null)
+
+    const { selectedId, draft, select } = useSelectedFromQuery(items, io)
+    select('')
+    await Promise.resolve()
+
+    expect(draft.value).toBe(true)
+    expect(selectedId.value).toBe('')
+    expect(written.at(-1)).toBeNull() // 清掉 ?c=
+  })
+
+  it('草稿态下选中已有会话 → 退出草稿', () => {
+    const items = ref([{ id: 'a' }])
+    const { io } = fakeIO(null)
+
+    const { draft, select } = useSelectedFromQuery(items, io)
+    select('')
+    select('a')
+
+    expect(draft.value).toBe(false)
+  })
+})

@@ -38,7 +38,7 @@ func New(cfg *config.Config, db *sqlx.DB) *Server {
 	return &Server{
 		cfg:          cfg,
 		conversation: service.NewConversationService(db),
-		message:      service.NewMessageService(db),
+		message:      service.NewMessageService(db, llm.NewClient()),
 		provider:     service.NewProviderService(db, llm.NewClient()),
 	}
 }
@@ -75,6 +75,7 @@ func (s *Server) Handler() http.Handler {
 
 			// 消息管理（message 为会话的子资源：列表 / 删除）
 			r.Get("/conversations/{id}/messages", s.listMessages)
+			r.Post("/conversations/{id}/messages", s.sendMessage)
 			r.Delete("/conversations/{id}/messages/{messageId}", s.deleteMessage)
 
 			// 服务商管理（service provider：列表 / 添加 / 更新 / 删除，名称为业务标识）

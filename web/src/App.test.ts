@@ -20,3 +20,21 @@ describe('App 启动加载', () => {
     await vi.waitFor(() => expect(providers).toHaveBeenCalled())
   })
 })
+
+describe('App · 草稿态（01-需求 #5b）', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('点「新的聊天」是纯前端：不创建会话，右侧切到草稿对话页', async () => {
+    vi.spyOn(conversationApi, 'list').mockResolvedValue({ list: [], page: 1, pageSize: 10, total: 0 })
+    vi.spyOn(providerApi, 'list').mockResolvedValue([])
+    const create = vi.spyOn(conversationApi, 'create')
+
+    const w = mount(App)
+    await vi.waitFor(() => expect(conversationApi.list).toHaveBeenCalled())
+
+    await w.find('[data-new-chat]').trigger('click')
+    await vi.waitFor(() => expect(w.text()).toContain('开始新的对话'))
+
+    expect(create).not.toHaveBeenCalled()
+  })
+})

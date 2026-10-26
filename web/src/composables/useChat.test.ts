@@ -89,3 +89,170 @@ describe('useChat', () => {
     expect(api.list).toHaveBeenCalledTimes(2)
   })
 })
+
+// ---------- 发送（任务 6） ----------
+import * as msgApi from '../api/messages'
+
+function deltaChunk(content: string) {
+  return { type: 'delta' as const, content }
+}
+
+function fakeSend(events: Array<Record<string, unknown>>, opts: { failBefore?: Error } = {}) {
+  return vi.spyOn(msgApi, 'send').mockImplementation((_id, _input, onEvent) => {
+    if (opts.failBefore) {
+      return { abort: () => {}, done: Promise.reject(opts.failBefore) }
+    }
+    const done = (async () => {
+      for (const e of events) onEvent(e as never)
+    })()
+    return { abort: () => {}, done }
+  })
+}
+
+describe('useChat.send', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('乐观插入用户消息 → streaming 占位 → delta 追加 → done 收尾', async () => {
+    vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
+    fakeSend([
+      { type: 'start', assistantMessageId: 'a1', seq: 2, model: 'deepseek-v4-pro', serviceProvider: 'deepseek' },
+      deltaChunk('泛型版'),
+      deltaChunk('参数化。'),
+      { type: 'done', messageCount: 2 },
+    ])
+    const onDone = vi.fn()
+
+    const id = ref('c1')
+    const { messages, status, send } = useChat(id, { onDone })
+    await send('帮我改成泛型')
+
+    expect(messages.value.map((m) => m.role)).toEqual(['user', 'assistant'])
+    expect(messages.value[0].content).toBe('帮我改成泛型')
+    expect(messages.value[1].content).toBe('泛型版参数化。')
+    expect(messages.value[1].model).toBe('deepseek-v4-pro')
+    expect(status.value).toBe('idle')
+    expect(onDone).toHaveBeenCalledWith('c1', 2)
+  })
+
+  it('error 事件 → status=error，保留已收内容', async () => {
+    vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
+    fakeSend([
+      { type: 'start', assistantMessageId: 'a1', seq: 2, model: 'm', serviceProvider: 'p' },
+      deltaChunk('收到一半'),
+      { type: 'error', message: '调用超时' },
+    ])
+
+    const { messages, status, error, send } = useChat(ref('c1'))
+    await send('你好')
+
+    expect(status.value).toBe('error')
+    expect(error.value).toBe('调用超时')
+    expect(messages.value[1].content).toBe('收到一半')
+  })
+
+  it('开流前失败（ApiError）→ status=error，不插入 assistant 占位', async () => {
+    vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
+    fakeSend([], { failBefore: new Error('该会话正在生成回复') })
+
+    const { messages, status, error, send } = useChat(ref('c1'))
+    await send('你好')
+
+    expect(status.value).toBe('error')
+    expect(error.value).toBe('该会话正在生成回复')
+    expect(messages.value.filter((m) => m.role === 'assistant')).toHaveLength(0)
+  })
+
+  it('草稿态（无会话）：先建会话，通知 App 选中，再用新 id 发送', async () => {
+    const ensureConversation = vi.fn(async () => 'new-c1')
+    const onConversationReady = vi.fn()
+    const sendSpy = fakeSend([{ type: 'done', messageCount: 1 }])
+
+    const { send } = useChat(ref(''), { ensureConversation, onConversationReady })
+    await send('第一句')
+
+    expect(ensureConversation).toHaveBeenCalledTimes(1)
+    expect(onConversationReady).toHaveBeenCalledWith('new-c1')
+    expect(sendSpy.mock.calls[0][0]).toBe('new-c1')
+  })
+
+  it('空内容不发送', async () => {
+    const sendSpy = fakeSend([])
+    const { send } = useChat(ref('c1'))
+    await send('   ')
+    expect(sendSpy).not.toHaveBeenCalled()
+  })
+
+  it('stop() 中断并保留已收内容', async () => {
+    vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
+    let abortFn: (() => void) | null = null
+    vi.spyOn(msgApi, 'send').mockImplementation((_id, _input, onEvent) => {
+      onEvent({ type: 'start', assistantMessageId: 'a1', seq: 2, model: 'm', serviceProvider: 'p' } as never)
+      onEvent({ type: 'delta', content: '一半' } as never)
+      return { abort: () => { abortFn = () => {} }, done: new Promise<void>(() => {}) }
+    })
+
+    const { messages, status, send, stop } = useChat(ref('c1'))
+    void send('你好')
+    await vi.waitFor(() => expect(status.value).toBe('streaming'))
+
+    stop()
+
+    expect(abortFn).not.toBeNull()
+    expect(status.value).toBe('idle')
+    expect(messages.value[1].content).toBe('一半')
+  })
+})
+
+describe('useChat 竞态', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('历史比发送晚回来时，不覆盖乐观插入的消息', async () => {
+    let resolveList: (v: { list: Message[]; hasMore: boolean }) => void = () => {}
+    vi.spyOn(api, 'list').mockImplementation(
+      () => new Promise((r) => { resolveList = r as never }),
+    )
+    fakeSend([
+      { type: 'start', assistantMessageId: 'a1', seq: 2, model: 'm', serviceProvider: 'p' },
+      { type: 'done', messageCount: 2 },
+    ])
+
+    const { messages, send } = useChat(ref('c1'))
+    await send('你好')
+
+    // 历史这时才回来（空列表）——不能把刚发的两条消息冲掉
+    resolveList({ list: [], hasMore: false })
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(messages.value.map((m) => m.role)).toEqual(['user', 'assistant'])
+  })
+})
+
+describe('useChat · 错误来源区分', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('生成中失败：errorKind=stream，且空占位被摘掉', async () => {
+    vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
+    fakeSend([
+      { type: 'start', assistantMessageId: 'a1', seq: 2, model: 'm', serviceProvider: 'p' },
+      { type: 'error', message: '上游返回 401：api_key 无效' },
+    ])
+
+    const { messages, status, error, errorKind, send } = useChat(ref('c1'))
+    await send('你好')
+
+    expect(status.value).toBe('error')
+    expect(errorKind.value).toBe('stream')
+    expect(error.value).toContain('401')
+    expect(messages.value.filter((m) => m.role === 'assistant')).toHaveLength(0) // 空占位已摘
+    expect(messages.value.filter((m) => m.role === 'user')).toHaveLength(1)
+  })
+
+  it('拉历史失败：errorKind=load', async () => {
+    vi.spyOn(api, 'list').mockRejectedValue(new Error('连不上本地服务'))
+
+    const { status, errorKind } = useChat(ref('c1'))
+    await vi.waitFor(() => expect(status.value).toBe('error'))
+
+    expect(errorKind.value).toBe('load')
+  })
+})

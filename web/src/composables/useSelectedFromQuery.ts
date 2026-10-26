@@ -7,6 +7,8 @@ export interface QueryIO {
 
 export interface UseSelectedFromQuery {
   selectedId: Ref<string>
+  /** 草稿态：用户刚点了「新的聊天」，还没有会话（01-需求 #5b） */
+  draft: Ref<boolean>
   select: (id: string) => void
 }
 
@@ -28,17 +30,21 @@ const defaultIO: QueryIO = {
  *   - 有效 ?c= → 选它（列表后到时也生效）
  *   - 无效 ?c= → 回落第一条并清掉参数（不留死链）
  *   - 用户主动切换（select）→ 回写 ?c=
+ *   - `select('')` → 草稿态：清掉 ?c=，且不被自动回落覆盖（01-需求 #5b）
  */
 export function useSelectedFromQuery(
   items: Ref<{ id: string }[]>,
   io: QueryIO = defaultIO,
 ): UseSelectedFromQuery {
   const selectedId = ref('')
+  const draft = ref(false)
   const wanted = io.read()
 
   watch(
     items,
     (list) => {
+      // 草稿态：用户主动点了「新的聊天」，不要自动回落到第一条
+      if (draft.value) return
       if (list.length === 0) return
       // 已经选好了且仍有效 → 不动
       if (selectedId.value && list.some((i) => i.id === selectedId.value)) return
@@ -54,10 +60,18 @@ export function useSelectedFromQuery(
     { immediate: true },
   )
 
+  /** 选中会话；传空串表示草稿态。只有这里回写地址栏。 */
   function select(id: string): void {
+    if (!id) {
+      draft.value = true
+      selectedId.value = ''
+      io.write(null)
+      return
+    }
+    draft.value = false
     selectedId.value = id
     io.write(id)
   }
 
-  return { selectedId, select }
+  return { selectedId, draft, select }
 }

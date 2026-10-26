@@ -3,12 +3,16 @@ package service
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 
 	"gululoop/internal/dal"
 	"gululoop/internal/dal/models"
+	"gululoop/internal/llm"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -21,11 +25,276 @@ const messageColumns = `id, conversation_id, seq, role, content, service_provide
 //
 // 直接持有 *sqlx.DB（ADR-0010）：读走自动提交，需要原子性的写用 dal.WithTx 包一段。
 type MessageService struct {
-	db *sqlx.DB
+	db  *sqlx.DB
+	llm *llm.Client
+
+	// busy 是"同一会话同时只能有一次生成"的进程内互斥（02-后端设计.md §4）。
+	// 单用户本地工具，一个 map 就够，不需要分布式锁。
+	busy sync.Map
 }
 
-func NewMessageService(db *sqlx.DB) *MessageService {
-	return &MessageService{db: db}
+func NewMessageService(db *sqlx.DB, llmClient *llm.Client) *MessageService {
+	return &MessageService{db: db, llm: llmClient}
+}
+
+// ErrConversationBusy 同一会话已有生成中的回复（handler 映射 409）。
+var ErrConversationBusy = errors.New("该会话正在生成回复")
+
+// SendRequest 是一次发送请求。
+type SendRequest struct {
+	ConversationID string
+	Content        string
+	Model          string // 可选：覆盖服务商默认模型
+}
+
+// SendEvent 是发送过程中抛给调用方（handler → NDJSON）的事件。
+//
+// start: AssistantMessageID / Seq / Model / ServiceProvider
+// delta: Content
+// done:  AssistantMessageID / Seq / MessageCount
+type SendEvent struct {
+	Type               string // start | delta | done
+	Content            string
+	UserMessageID      string
+	AssistantMessageID string
+	Seq                int64
+	Model              string
+	ServiceProvider    string
+	MessageCount       int
+}
+
+// contextRecentLimit 每次发送带上的最近消息条数。
+//
+// 任务 6 只做"最近 N 条"；摘要 + 三档拼接在任务 10（01-需求 #3）补上。
+const contextRecentLimit = 10
+
+// Send 发一条用户消息并流式接收助手回复。
+//
+// 时序（02-后端设计.md §1.3 / §3.1）：
+//  1. 开流前的校验（内容、会话、服务商、并发）—— 失败返回错误，handler 走 JSON 4xx，**不写流**；
+//  2. tx1：写入 user 消息 + 维护 message_count / last_message_time；
+//  3. 发 start 事件（assistantMessageId 此刻就定，但只有成功才落库）；
+//  4. 调上游流式，逐段 emit delta（思考内容只累加、不推给前端）；
+//  5. tx2：写入 assistant 消息 + 维护计数；发 done 事件。
+//
+// 上游失败时 user 消息保留、assistant 不写入，错误原样返回（handler 转 error 事件）。
+// 事务里绝不放 LLM 调用（§3.1 规则 3）。
+func (ms *MessageService) Send(ctx context.Context, req SendRequest, emit func(SendEvent) error) error {
+	content := strings.TrimSpace(req.Content)
+	if content == "" {
+		return &ValidationError{Message: "content 不能为空"}
+	}
+
+	if _, err := ms.getConversation(ctx, req.ConversationID); err != nil {
+		return err
+	}
+
+	provider, setting, err := ms.firstProvider(ctx)
+	if err != nil {
+		return err
+	}
+	if provider == "" {
+		return &ValidationError{Message: "没有可用的服务商，请先在服务商设置里添加"}
+	}
+
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = setting.Model
+	}
+
+	if _, loaded := ms.busy.LoadOrStore(req.ConversationID, struct{}{}); loaded {
+		return ErrConversationBusy
+	}
+	defer ms.busy.Delete(req.ConversationID)
+
+	userMsg, err := ms.appendMessage(ctx, req.ConversationID, models.Message{
+		Role:    models.RoleUser,
+		Content: content,
+	})
+	if err != nil {
+		return err
+	}
+
+	history, err := ms.recentMessages(ctx, req.ConversationID, contextRecentLimit)
+	if err != nil {
+		return err
+	}
+	chatMessages := make([]llm.ChatMessage, 0, len(history))
+	for _, m := range history {
+		chatMessages = append(chatMessages, llm.ChatMessage{Role: string(m.Role), Content: m.Content})
+	}
+
+	assistantID, err := models.NewUUID()
+	if err != nil {
+		return fmt.Errorf("生成消息 id: %w", err)
+	}
+	assistantSeq := userMsg.Seq + 1
+
+	if err := emit(SendEvent{
+		Type:               "start",
+		UserMessageID:      userMsg.ID,
+		AssistantMessageID: assistantID,
+		Seq:                assistantSeq,
+		Model:              model,
+		ServiceProvider:    provider,
+	}); err != nil {
+		return err
+	}
+
+	var text, thinking strings.Builder
+	startedAt := time.Now()
+	_, streamErr := ms.llm.Stream(ctx, llm.StreamRequest{
+		BaseURL:  setting.BaseURL,
+		APIKey:   setting.APIKey,
+		Model:    model,
+		Messages: chatMessages,
+	}, func(e llm.StreamEvent) error {
+		if e.ThinkingDelta != "" {
+			thinking.WriteString(e.ThinkingDelta)
+		}
+		if e.Delta == "" {
+			return nil
+		}
+		text.WriteString(e.Delta)
+		return emit(SendEvent{Type: "delta", Content: e.Delta})
+	})
+	if streamErr != nil {
+		return streamErr
+	}
+
+	thinkingDuration := int64(0)
+	if thinking.Len() > 0 {
+		thinkingDuration = time.Since(startedAt).Milliseconds()
+	}
+
+	assistantMsg, err := ms.appendMessage(ctx, req.ConversationID, models.Message{
+		ID:               assistantID,
+		Seq:              assistantSeq,
+		Role:             models.RoleAssistant,
+		Content:          text.String(),
+		ServiceProvider:  provider,
+		Model:            model,
+		ThinkingContent:  thinking.String(),
+		ThinkingDuration: thinkingDuration,
+	})
+	if err != nil {
+		return err
+	}
+
+	return emit(SendEvent{
+		Type:               "done",
+		AssistantMessageID: assistantMsg.ID,
+		Seq:                assistantMsg.Seq,
+		Model:              model,
+		ServiceProvider:    provider,
+		MessageCount:       int(assistantMsg.Total),
+	})
+}
+
+// appendedMessage 是一次写入的结果（事件里要用 id / seq / 会话总数）。
+type appendedMessage struct {
+	ID    string
+	Seq   int64
+	Total int64
+}
+
+// appendMessage 在**一个事务**里写入消息并维护会话的计数与最后消息时间。
+func (ms *MessageService) appendMessage(ctx context.Context, conversationID string, msg models.Message) (appendedMessage, error) {
+	var out appendedMessage
+
+	err := dal.WithTx(ctx, ms.db, func(ctx context.Context, tx *sqlx.Tx) error {
+		var seq int64
+		if msg.Seq > 0 {
+			seq = msg.Seq
+		} else {
+			if err := tx.GetContext(ctx, &seq,
+				`SELECT COALESCE(MAX(seq), 0) + 1 FROM x_messages WHERE conversation_id = ?`,
+				conversationID); err != nil {
+				return fmt.Errorf("取会话 %s 的下一个 seq: %w", conversationID, err)
+			}
+		}
+
+		id := msg.ID
+		if id == "" {
+			var err error
+			if id, err = models.NewUUID(); err != nil {
+				return fmt.Errorf("生成消息 id: %w", err)
+			}
+		}
+		out.ID, out.Seq = id, seq
+
+		now := time.Now()
+		const insert = `INSERT INTO x_messages
+			(id, conversation_id, seq, role, content, service_provider, model, thinking_content, thinking_duration, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		if _, err := tx.ExecContext(ctx, insert, id, conversationID, seq, string(msg.Role), msg.Content,
+			msg.ServiceProvider, msg.Model, msg.ThinkingContent, msg.ThinkingDuration, now, now); err != nil {
+			return fmt.Errorf("写入消息: %w", err)
+		}
+
+		// 计数增量 +1、时间刷新到这条消息（02-后端设计.md §2 维护契约）
+		const bump = `UPDATE x_conversations
+			SET message_count = message_count + 1, last_message_time = ?
+			WHERE id = ?`
+		if _, err := tx.ExecContext(ctx, bump, now, conversationID); err != nil {
+			return fmt.Errorf("维护会话计数: %w", err)
+		}
+
+		return tx.GetContext(ctx, &out.Total, `SELECT message_count FROM x_conversations WHERE id = ?`, conversationID)
+	})
+	if err != nil {
+		return appendedMessage{}, err
+	}
+	return out, nil
+}
+
+// getConversation 只判会话存在（不存在 → sql.ErrNoRows）。
+func (ms *MessageService) getConversation(ctx context.Context, id string) (*models.Conversation, error) {
+	var c models.Conversation
+	const query = `SELECT ` + conversationColumns + ` FROM x_conversations WHERE id = ?`
+	if err := ms.db.GetContext(ctx, &c, query, id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, sql.ErrNoRows
+		}
+		return nil, fmt.Errorf("查询会话 %s: %w", id, err)
+	}
+	return &c, nil
+}
+
+// firstProvider 取第一个服务商（按创建时间）作为发送时的上游。
+//
+// "使用中服务商"在 2026-10-23 被撤销（01-需求 #1f 已删），MVP 的口径是：
+// 按创建时间取第一个服务商，模型用它的默认模型或请求体覆盖值。
+// 没有服务商时返回 ("", 空配置, nil)，由调用方给出可直出的提示。
+func (ms *MessageService) firstProvider(ctx context.Context) (string, models.ProviderSetting, error) {
+	var row models.ServiceProvider
+	const query = `SELECT ` + providerColumns + ` FROM x_service_provider ORDER BY created_at LIMIT 1`
+	if err := ms.db.GetContext(ctx, &row, query); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", models.ProviderSetting{}, nil
+		}
+		return "", models.ProviderSetting{}, fmt.Errorf("查询服务商: %w", err)
+	}
+
+	var setting models.ProviderSetting
+	if err := json.Unmarshal([]byte(row.SettingJSON), &setting); err != nil {
+		return "", models.ProviderSetting{}, fmt.Errorf("解析服务商 %s 的配置: %w", row.ServiceProvider, err)
+	}
+	return row.ServiceProvider, setting, nil
+}
+
+// recentMessages 取会话最近 limit 条消息，按 seq 升序返回（拼上下文用）。
+func (ms *MessageService) recentMessages(ctx context.Context, conversationID string, limit int) ([]models.Message, error) {
+	list := make([]models.Message, 0, limit)
+	const query = `SELECT ` + messageColumns + ` FROM x_messages
+		WHERE conversation_id = ? ORDER BY seq DESC LIMIT ?`
+	if err := ms.db.SelectContext(ctx, &list, query, conversationID, limit); err != nil {
+		return nil, fmt.Errorf("查询会话 %s 的上下文: %w", conversationID, err)
+	}
+	for i, j := 0, len(list)-1; i < j; i, j = i+1, j-1 {
+		list[i], list[j] = list[j], list[i]
+	}
+	return list, nil
 }
 
 // ListMessages 按 seq 倒序（对话最新在前）查询会话内消息，用于向上翻页。

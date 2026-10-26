@@ -107,3 +107,117 @@ func isDecodeError(err error) bool {
 	}
 	return false
 }
+
+// ChatMessage 是一条上下文消息（角色 + 纯文本内容）。
+type ChatMessage struct {
+	Role    string // system | user | assistant
+	Content string
+}
+
+// StreamRequest 是一次流式对话请求。
+type StreamRequest struct {
+	BaseURL  string
+	APIKey   string
+	Model    string
+	Messages []ChatMessage
+}
+
+// Usage 是上游返回的 token 用量（有的兼容端点不返回，保持零值）。
+type Usage struct {
+	PromptTokens     int64
+	CompletionTokens int64
+	TotalTokens      int64
+}
+
+// StreamEvent 是一次流式增量：正文、思考内容（reasoning_content）与末尾的用量。
+type StreamEvent struct {
+	Delta         string
+	ThinkingDelta string
+	Usage         *Usage
+}
+
+// Stream 发起一次流式 Chat Completions，把增量逐段交给 onEvent。
+//
+// 行为约定（02-后端设计.md §1.3 / §3.2）：
+//   - SSE 分帧、跨 chunk 半行、`[DONE]` 由 SDK 处理；我们只关心 delta
+//   - `reasoning_content`（DeepSeek 思考）不是规范字段，从 SDK 的额外字段逃生舱取
+//   - onEvent 返回错误 → 立刻中止（前端断开 / 写流失败），错误原样上抛
+//   - 自动重试已关（WithMaxRetries(0)）：流式重试会重复计费、前端收到两段拼接
+func (c *Client) Stream(ctx context.Context, req StreamRequest, onEvent func(StreamEvent) error) (Usage, error) {
+	sdk := newSDKClient(req.BaseURL, req.APIKey)
+
+	params := openai.ChatCompletionNewParams{
+		Model:    openai.ChatModel(req.Model),
+		Messages: toSDKMessages(req.Messages),
+	}
+
+	stream := sdk.Chat.Completions.NewStreaming(ctx, params)
+	defer func() { _ = stream.Close() }()
+
+	var usage Usage
+	for stream.Next() {
+		chunk := stream.Current()
+		if chunk.Usage.TotalTokens != 0 {
+			usage = Usage{
+				PromptTokens:     chunk.Usage.PromptTokens,
+				CompletionTokens: chunk.Usage.CompletionTokens,
+				TotalTokens:      chunk.Usage.TotalTokens,
+			}
+		}
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+
+		delta := chunk.Choices[0].Delta
+		event := StreamEvent{Delta: delta.Content, ThinkingDelta: reasoningOf(delta)}
+		if event.Delta == "" && event.ThinkingDelta == "" {
+			continue
+		}
+		if err := onEvent(event); err != nil {
+			return usage, err
+		}
+	}
+
+	if err := stream.Err(); err != nil {
+		return usage, normalizeError(ctx, err)
+	}
+	return usage, nil
+}
+
+// toSDKMessages 把我们的消息转成 SDK 的联合类型。
+func toSDKMessages(msgs []ChatMessage) []openai.ChatCompletionMessageParamUnion {
+	out := make([]openai.ChatCompletionMessageParamUnion, 0, len(msgs))
+	for _, m := range msgs {
+		switch m.Role {
+		case "system":
+			out = append(out, openai.SystemMessage(m.Content))
+		case "assistant":
+			out = append(out, openai.AssistantMessage(m.Content))
+		default:
+			out = append(out, openai.UserMessage(m.Content))
+		}
+	}
+	return out
+}
+
+// reasoningOf 取出 reasoning_content（DeepSeek 的思考内容）。
+//
+// 实测（openai-go v1.12.0）：chunk 的 delta 上 `JSON.ExtraFields` **不会**被填充，
+// 但 `delta.RawJSON()` 保留完整原始 JSON。所以这里用"二次解析 delta 原始 JSON"这条兜底
+// （ADR-0014 里预留的降级路径，只是粒度落在单个 delta 上，比截获整个响应体更轻）。
+//
+// 先用子串判断挡掉绝大多数 chunk（没有思考内容时不做 unmarshal）；解析失败一律返回空串，
+// 绝不让"少一个思考字段"影响正文流。
+func reasoningOf(delta openai.ChatCompletionChunkChoiceDelta) string {
+	raw := delta.RawJSON()
+	if raw == "" || !strings.Contains(raw, "reasoning_content") {
+		return ""
+	}
+	var v struct {
+		ReasoningContent string `json:"reasoning_content"`
+	}
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return ""
+	}
+	return v.ReasoningContent
+}

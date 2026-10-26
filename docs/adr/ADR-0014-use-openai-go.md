@@ -31,7 +31,7 @@ Summarizer.Summarize(ctx, msgs []Message) (string, error)
 |------|----|------|
 | **封装边界** | 全封装：SDK 的 import 只出现在 `internal/llm`；`service` / `httpapi` 只见我们自己的 `Message` / `StreamEvent` / `Usage` | 换库、升大版本、将来接 Anthropic 都只改一个包；业务层不被 SDK 类型牵着走 |
 | **自动重试** | **关掉**（`option.WithMaxRetries(0)`） | SDK 默认对 429/5xx **重试 2 次**；流式请求重试 = 上游重复计费 + 前端可能收到两段拼接的回复。重试语义由我们定：**开流前**可重试一次（用户无感），**写出 `start` 之后一律不重试**，只能走 `error` 事件 |
-| **`thinkingContent`（DeepSeek 思考）** | 保：从 SDK 响应对象的额外字段（`ExtraFields` / raw JSON）里取 `reasoning_content`；**挖不到就退到"中间件截获原始响应体、第二遍解析"（约 30 行）**；两者都不可用时降级为"不存思考内容，字段保留但恒为空"（不改表、不改前端契约） | `01-需求` 已承诺该字段照常返回；`deepseek-reasoner` 是真实场景 |
+| **`thinkingContent`（DeepSeek 思考）** | 保。**实测（v1.12.0）：chunk delta 的 `JSON.ExtraFields` 不会被填充**，但 `delta.RawJSON()` 保留完整原始 JSON —— 于是走"对单个 delta 做二次解析"这条降级路径（比截获整个响应体更轻，先做子串判断挡掉绝大多数 chunk）；再不可用则降级为"不存思考内容"（不改表、不改前端契约） | `01-需求` 已承诺该字段照常返回；`deepseek-reasoner` 是真实场景 |
 | **client 生命周期 / 超时** | 每次调用构造 `openai.Client`（`option.WithBaseURL` + `option.WithAPIKey`），**不缓存**；超时一律 `context.WithTimeout`（不用 `WithRequestTimeout`） | client 只是 http 包装 + options，构造廉价、无状态、无失效问题；超时统一走 context 才能和取消、NDJSON 写出对齐 |
 
 `/v1/models`（#14 拉取模型列表、#15 检测连通）改走 SDK 的 `client.Models.List()`，不再手写 HTTP。
@@ -57,7 +57,7 @@ Summarizer.Summarize(ctx, msgs []Message) (string, error)
   3. **自动重试必须显式关**：`WithMaxRetries(0)` 少写一行就会重复计费，这是本轮最容易踩的坑（写进 `internal/llm` 的注释与测试）。
   4. SDK 的"额外字段"能力属于其内部实现细节，未来版本可能调整 → 降级路径（中间件 / 不存）要一直保留。
 - **可逆性**：**中高**。全封装让"换回手写或换别的库"只动 `internal/llm`；真正难逆的只有 `go.mod` 多了一个依赖。
-- **验证方式**：`httptest` 假上游（`WithBaseURL`）覆盖 200 正常流 / 非 200 JSON 错误体 / 超时 / 取消 / 跨 chunk 半行 / `[DONE]` / `reasoning_content` 透传 / `tool_calls` 增量类型；**断言"重试次数 = 0"**（假上游计数，429 只应看到 1 次请求）；`Models.List` 覆盖 401、404、非 JSON。
+- **验证方式（已落地）**：`httptest` 假上游（`WithBaseURL`）覆盖：200 正常流、跨 chunk 半行、`reasoning_content` 透传、非 200 JSON 错误体、超时、**429 只请求一次**（证明自动重试已关）、回调返回错误时立刻中止；`Models.List` 覆盖 401 / 404 端点 / 非 JSON / 超时 / 不可达。
 
 ## 重新评估的触发条件
 
