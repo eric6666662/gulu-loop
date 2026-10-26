@@ -22,7 +22,7 @@
 - 🟡 消息：只有"读 + 删"（分页列表、删除）；流式发送与单条内容未实现
 - ✅ LLM 客户端（`internal/llm`，`openai-go` 全封装）：拉取模型列表、检测连通
 - ❌ 流式发送（NDJSON）、上下文拼接与自动摘要
-- 🟡 前端聊天界面：侧栏会话列表与会话头已完成；消息区与输入区仍是空壳（任务 5、6）
+- 🟡 前端聊天界面：侧栏、会话头、消息区（Markdown + 高亮）已完成；输入区与发送仍是空壳（任务 6）
 
 ## 技术栈
 
@@ -41,7 +41,7 @@
 
 - Vue 3.5 + TypeScript 5.9 + Vite 7
 - Tailwind CSS v4（`@tailwindcss/vite`，无 `tailwind.config.js`；token 唯一来源 `docs/设计系统/tokens.css`）
-- 图标：lucide-vue-next；Markdown：markdown-it + shiki（任务 5 起使用）
+- 图标：lucide-vue-next；Markdown：markdown-it（`@types/markdown-it` 仅类型）+ shiki（**只显式引入 13 种语言 + JS 正则引擎**，`lib/highlighter` 单独成 chunk 懒加载）
 - 测试：vitest 3 + @vue/test-utils + happy-dom
 
 ## 运行 · 测试 · 构建
@@ -116,8 +116,8 @@ README.md                   # 空（待补）
 | 流式协议（NDJSON） | ❌ | 未实现 |
 | 上下文拼接 / 自动摘要 | ❌ | 未实现 |
 | 拉取模型列表 / 检测连通 | ✅ | 接口 #14 / #15 已实现（前端弹层 + ⋯ 菜单） |
-| 前端聊天界面 | 🟡 部分 | 侧栏会话列表（分页/滚动加载/新建/删除）、会话头（标题 + 重命名 + 窄屏抽屉）、`?c=` 深链已完成；**消息区与输入区为空壳**（任务 5、6） |
-| 测试 | ✅ | Go 48 个测试函数（6 包全绿）；前端 86 个 vitest 用例（13 文件全绿） |
+| 前端聊天界面 | 🟡 部分 | 侧栏会话列表、会话头、`?c=` 深链、**消息区（Markdown + 代码高亮 + 骨架/空态/错误卡）** 已完成；**输入区与发送未实现**（任务 6） |
+| 测试 | ✅ | Go 48 个测试函数（6 包全绿）；前端 105 个 vitest 用例（16 文件全绿） |
 | 版本控制 | ✅ | `main` → `origin`（2026-10-26 初始化，`.agents/` 与 `node_modules/` 不入库） |
 
 <!-- END:FLOW-INIT -->

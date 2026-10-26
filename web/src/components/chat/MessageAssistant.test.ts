@@ -1,0 +1,49 @@
+import { describe, expect, it, vi } from 'vitest'
+import { flushPromises, mount } from '@vue/test-utils'
+import MessageAssistant from './MessageAssistant.vue'
+import type { Message } from '../../api/messages'
+
+const msg: Message = {
+  id: 'm1',
+  conversationId: 'c1',
+  seq: 2,
+  role: 'assistant',
+  content: '**粗体** 与 `code`\n\n```go\npackage main\n```',
+  serviceProvider: 'deepseek',
+  model: 'deepseek-v4-pro',
+  thinkingContent: '',
+  thinkingDuration: 0,
+  createdAt: '2026-10-26T10:31:00Z',
+  updatedAt: '2026-10-26T10:31:00Z',
+}
+
+describe('MessageAssistant', () => {
+  it('正文按 Markdown 渲染（无气泡容器）', async () => {
+    const w = mount(MessageAssistant, { props: { message: msg } })
+
+    // 首次渲染要等 shiki 异步初始化，用 waitFor 而不是一次性断言
+    await vi.waitFor(() => {
+      expect(w.find('[data-body]').html()).toContain('<strong>粗体</strong>')
+    })
+    const body = w.find('[data-body]')
+    expect(body.html()).toContain('<code class="rounded-xs bg-surface-alt')
+    expect(body.html()).toContain('data-copy-code')
+  })
+
+  it('落款行常驻：模型名 + 时间', async () => {
+    const w = mount(MessageAssistant, { props: { message: msg } })
+    await flushPromises()
+
+    expect(w.find('[data-footer]').text()).toContain('deepseek-v4-pro')
+    expect(w.find('[data-footer] time').exists()).toBe(true)
+  })
+
+  it('思考内容不在正文里渲染（MVP 不展示）', async () => {
+    const w = mount(MessageAssistant, {
+      props: { message: { ...msg, thinkingContent: '让我想想…' } },
+    })
+    await flushPromises()
+
+    expect(w.text()).not.toContain('让我想想')
+  })
+})

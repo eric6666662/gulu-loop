@@ -107,9 +107,11 @@ async function doRename(title: string): Promise<void> {
     <main class="flex min-w-0 flex-1 flex-col bg-canvas">
       <ChatArea
         v-if="settingsPane.pane.value === 'chat'"
+        :conversation-id="selectedId"
         :title="currentTitle"
         @rename="renameOpen = true"
         @open-sidebar="sidebarOpen = true"
+        @open-settings="settingsPane.openSettings"
       />
       <SettingsView v-else @back="settingsPane.closeSettings" />
     </main>
