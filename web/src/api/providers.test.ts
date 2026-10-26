@@ -52,3 +52,27 @@ describe('api/providers · 探测接口', () => {
     await expect(api.fetchModels({ baseUrl: 'https://api.x/v1', apiKey: 'sk' })).rejects.toBeInstanceOf(ApiError)
   })
 })
+
+describe('activate（ADR-0015）', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('POST 到 :activate，返回被激活的那一条', async () => {
+    stubFetch({ code: 200, message: 'ok', data: { serviceProvider: 'relay', isActive: true } })
+
+    const got = await api.activate('relay')
+
+    expect(got.isActive).toBe(true)
+    const [url, init] = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(url).toBe('/api/v1/service-providers/relay:activate')
+    expect(init.method).toBe('POST')
+  })
+
+  it('404 时抛 ApiError（message 可直出）', async () => {
+    stubFetch({ code: 404, message: '服务商不存在' }, 404)
+
+    const err = await api.activate('nope').catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(ApiError)
+    expect((err as ApiError).message).toBe('服务商不存在')
+  })
+})

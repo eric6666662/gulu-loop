@@ -14,6 +14,8 @@ export interface Provider {
   model: string
   models: ModelRef[]
   hasApiKey: boolean
+  /** 是否为「激活的服务商」：全局恰好 0 或 1 个为 true（ADR-0015） */
+  isActive: boolean
   createdAt: string
   updatedAt: string
 }
@@ -75,6 +77,16 @@ export async function fetchModels(input: FetchModelsInput): Promise<string[]> {
     body: JSON.stringify(input),
   })
   return data.models
+}
+
+/**
+ * 激活服务商（ADR-0015 / 02-后端设计.md §1.9）：空请求体，返回被激活的那一条。
+ * 需求里没有"取消激活"，所以是单向动作。
+ */
+export function activate(name: string): Promise<Provider> {
+  return request<Provider>(`/api/v1/service-providers/${encodeURIComponent(name)}:activate`, {
+    method: 'POST',
+  })
 }
 
 export function remove(name: string): Promise<void> {

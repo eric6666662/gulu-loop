@@ -11,11 +11,14 @@ export interface ProviderModel {
 
 export interface UseProviders {
   providers: Ref<Provider[]>
+  /** 激活的服务商（全局恰好 0 或 1 个）；无激活时为 null（ADR-0015） */
+  activeProvider: ComputedRef<Provider | null>
   models: ComputedRef<ProviderModel[]>
   loading: Ref<boolean>
   error: Ref<string>
   load: () => Promise<void>
   test: (name: string) => Promise<api.ProviderTestResult>
+  activate: (name: string) => Promise<Provider>
   create: (input: api.ProviderInput) => Promise<Provider>
   update: (name: string, input: api.ProviderInput) => Promise<Provider>
   remove: (name: string) => Promise<void>
@@ -31,6 +34,11 @@ export function useProviders(): UseProviders {
   const providers = ref<Provider[]>([])
   const loading = ref(false)
   const error = ref('')
+
+  // 激活的服务商：全局唯一，来自后端的 isActive（ADR-0015）
+  const activeProvider = computed<Provider | null>(
+    () => providers.value.find((p) => p.isActive) ?? null,
+  )
 
   const models = computed<ProviderModel[]>(() =>
     providers.value.flatMap((p) =>
@@ -52,6 +60,18 @@ export function useProviders(): UseProviders {
     } finally {
       loading.value = false
     }
+  }
+
+  /**
+   * 激活服务商：成功后把返回的那一条**整条替换**进本地列表、其余 isActive 置 false，
+   * 不重拉列表（02-后端设计.md §5.2 G）。失败原样抛给页面弹 toast。
+   */
+  async function activate(name: string): Promise<Provider> {
+    const updated = await api.activate(name)
+    providers.value = providers.value.map((p) =>
+      p.serviceProvider === updated.serviceProvider ? updated : { ...p, isActive: false },
+    )
+    return updated
   }
 
   async function remove(name: string): Promise<void> {
@@ -82,5 +102,5 @@ export function useProviders(): UseProviders {
     return updated
   }
 
-  return { providers, models, loading, error, load, test, create, update, remove }
+  return { providers, activeProvider, models, loading, error, load, test, activate, create, update, remove }
 }

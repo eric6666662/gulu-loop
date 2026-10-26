@@ -14,6 +14,7 @@ const provider: Provider = {
     { id: 'deepseek-reasoner', name: 'R1' },
   ],
   hasApiKey: true,
+  isActive: false,
   createdAt: '2026-10-26T00:00:00Z',
   updatedAt: '2026-10-26T00:00:00Z',
 }
@@ -91,5 +92,32 @@ describe('ProviderRow', () => {
     const w = mount(ProviderRow, { props: { provider } })
 
     expect(w.find('[data-edit]').attributes('aria-label')).toBe('编辑 DeepSeek')
+  })
+})
+
+describe('ProviderRow · 激活按钮（ADR-0015）', () => {
+  it('行内按钮顺序 = 激活 / 编辑 / 更多', () => {
+    const w = mount(ProviderRow, { props: { provider } })
+
+    const labels = w.findAll('button').map((b) => b.attributes('aria-label'))
+    expect(labels[0]).toBe('激活 DeepSeek')
+    expect(labels[1]).toBe('编辑 DeepSeek')
+    expect(labels[2]).toBe('DeepSeek 的更多操作')
+  })
+
+  it('isActive 透传给激活按钮（文字态）', () => {
+    const w = mount(ProviderRow, { props: { provider: { ...provider, isActive: true } } })
+
+    expect(w.find('[data-activate]').text()).toContain('激活')
+    expect(w.find('[data-activate]').attributes('aria-pressed')).toBe('true')
+  })
+
+  it('点激活按钮 emit activate（不触发 edit）', async () => {
+    const w = mount(ProviderRow, { props: { provider } })
+
+    await w.find('[data-activate]').trigger('click')
+
+    expect(w.emitted('activate')).toHaveLength(1)
+    expect(w.emitted('edit')).toBeUndefined()
   })
 })

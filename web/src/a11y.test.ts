@@ -6,6 +6,7 @@ import Composer from './components/chat/Composer.vue'
 import MessageAssistant from './components/chat/MessageAssistant.vue'
 import MessageUser from './components/chat/MessageUser.vue'
 import ProviderBanner from './components/chat/ProviderBanner.vue'
+import ProviderActivateButton from './components/settings/ProviderActivateButton.vue'
 import ProviderRow from './components/settings/ProviderRow.vue'
 import type { Message } from './api/messages'
 
@@ -30,6 +31,7 @@ const provider = {
   model: 'deepseek-v4-pro',
   models: [{ id: 'deepseek-v4-pro', name: 'V4 Pro' }],
   hasApiKey: true,
+  isActive: false,
   createdAt: '2026-10-26T10:00:00Z',
   updatedAt: '2026-10-26T10:00:00Z',
 }
@@ -48,6 +50,8 @@ const cases: Array<[string, () => ReturnType<typeof mount>]> = [
   ['MessageUser', () => mount(MessageUser, { props: { message: { ...msg, role: 'user' } } })],
   ['ProviderBanner', () => mount(ProviderBanner)],
   ['ProviderRow', () => mount(ProviderRow, { props: { provider } })],
+  ['ProviderActivateButton（未激活）', () => mount(ProviderActivateButton, { props: { name: 'relay', active: false } })],
+  ['ProviderActivateButton（已激活）', () => mount(ProviderActivateButton, { props: { name: 'relay', active: true } })],
 ]
 
 /**

@@ -2,11 +2,12 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Ellipsis, Link, Pencil } from 'lucide-vue-next'
 import type { Provider } from '../../api/providers'
+import ProviderActivateButton from './ProviderActivateButton.vue'
 import ProviderAvatar from './ProviderAvatar.vue'
 import ProviderRowMenu from './ProviderRowMenu.vue'
 
 const props = defineProps<{ provider: Provider }>()
-const emit = defineEmits<{ edit: []; test: []; remove: [] }>()
+const emit = defineEmits<{ activate: []; edit: []; test: []; remove: [] }>()
 
 // 抽屉状态归本组件：菜单绝对定位在行内，点外部 / Esc 收起（02-ui设计.md ProviderRowMenu）
 const menuOpen = ref(false)
@@ -62,6 +63,12 @@ const websiteLabel = computed(() =>
           <span class="truncate">{{ websiteLabel }}</span>
         </a>
       </div>
+
+      <ProviderActivateButton
+        :name="provider.serviceProvider"
+        :active="provider.isActive"
+        @activate="$emit('activate')"
+      />
 
       <button
         type="button"

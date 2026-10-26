@@ -3,7 +3,12 @@ import type { Provider } from '../../api/providers'
 import ProviderRow from './ProviderRow.vue'
 
 defineProps<{ providers: Provider[] }>()
-defineEmits<{ edit: [provider: Provider]; test: [provider: Provider]; remove: [provider: Provider] }>()
+defineEmits<{
+  activate: [provider: Provider]
+  edit: [provider: Provider]
+  test: [provider: Provider]
+  remove: [provider: Provider]
+}>()
 </script>
 
 <template>
@@ -12,6 +17,7 @@ defineEmits<{ edit: [provider: Provider]; test: [provider: Provider]; remove: [p
       v-for="p in providers"
       :key="p.serviceProvider"
       :provider="p"
+      @activate="$emit('activate', p)"
       @edit="$emit('edit', p)"
       @test="$emit('test', p)"
       @remove="$emit('remove', p)"

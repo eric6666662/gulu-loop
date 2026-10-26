@@ -13,7 +13,7 @@ import SettingsEmpty from './SettingsEmpty.vue'
 
 const emit = defineEmits<{ back: [] }>()
 
-const { providers, loading, create, update, remove, test } = inject('providers') as UseProviders
+const { providers, loading, create, update, remove, activate, test } = inject('providers') as UseProviders
 const { step, editing, editProvider, createProvider, backToList } = inject('settingsPane') as UseSettingsPane
 const { push } = useToast()
 
@@ -76,6 +76,17 @@ async function doRemove(): Promise<void> {
 }
 
 /** 检测连通（#15）：成功/失败都用 toast 反馈，失败用危险样式带上游原因 */
+/** 激活服务商（ADR-0015）：点即生效、无二次确认；失败用危险 toast 带原因 */
+async function onActivate(p: Provider): Promise<void> {
+  if (p.isActive) return
+  try {
+    await activate(p.serviceProvider)
+    push(`已激活 ${p.serviceProvider}`)
+  } catch (e) {
+    push(`激活失败：${message(e)}`, 'danger')
+  }
+}
+
 async function onTest(p: Provider): Promise<void> {
   try {
     const res = await test(p.serviceProvider)
@@ -140,6 +151,7 @@ function onFetchConfirm(ids: string[]): void {
         <ProviderList
           v-if="providers.length > 0"
           :providers="providers"
+          @activate="onActivate"
           @edit="onEdit"
           @test="onTest"
           @remove="askRemove"

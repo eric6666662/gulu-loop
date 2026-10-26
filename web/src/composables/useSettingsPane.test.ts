@@ -9,6 +9,7 @@ const provider: Provider = {
   model: 'deepseek-v4-pro',
   models: [{ id: 'deepseek-v4-pro', name: 'V4 Pro' }],
   hasApiKey: true,
+  isActive: false,
   createdAt: '2026-10-26T00:00:00Z',
   updatedAt: '2026-10-26T00:00:00Z',
 }
