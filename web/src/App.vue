@@ -27,7 +27,12 @@ const currentTitle = computed(
   () => list.items.value.find((c) => c.id === selectedId.value)?.title ?? '',
 )
 
-onMounted(list.loadFirstPage)
+onMounted(() => {
+  // 两块数据都要在启动时加载：会话列表给侧栏，服务商列表给设置页与模型切换器。
+  // 曾经只调了 loadFirstPage，导致进设置页时服务商列表是空的（2026-10-26 修复）。
+  void list.loadFirstPage()
+  void providers.load()
+})
 
 function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
