@@ -1,0 +1,145 @@
+/* tokens.css —— 咕噜项目设计 token（Tailwind v4 主题）
+ *
+ * 权威分工
+ *   本文件 = 数值的唯一事实来源。
+ *   docs/设计稿.md = 理由、用法、示例（表内数值从本文件抄写，不反向定义）。
+ *   原型 = 本文件内容原样内联进 02-ui原型.html 的 <style type="text/tailwindcss">。
+ *   三处不一致时，以本文件为准；改值顺序：本文件 → 设计稿.md 表 → 原型/页面。
+ *
+ * 落地方式（Vue 3 + TS + Tailwind v4）
+ *   复制到 src/styles/tokens.css，在主样式里：
+ *     @import "tailwindcss";
+ *     @import "./tokens.css";
+ *   @theme 本身就是 CSS 变量，import 即生效，不需要 tailwind.config.js。
+ *
+ * 对比度（WCAG AA，普通字号 ≥ 4.5:1，均为实测值）
+ *   ink / surface 17.40 · ink-muted / surface 5.98 · ink-subtle / surface 4.97
+ *   primary / surface 5.17 · danger / surface 5.91 · success / surface 5.02 · warning / surface 5.02
+ *   on-primary / primary 5.17 · on-primary / danger 5.91 · on-primary / success 5.02
+ */
+@theme {
+  /* ========== 字体族：1 个无衬线正文 + 1 个等宽（代码） ========== */
+  --font-sans: "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+
+  /* ========== 字阶：--text-{名} + 行高 + 字距 ==========
+   * 界面控件 13–14px，阅读正文 16px（中文行高 ≥ 1.6）；标题负字距只在 ≥ 1.125rem 时用。
+   */
+  --text-caption: 0.75rem;   --text-caption--line-height: 1.125rem; --text-caption--letter-spacing: 0.01em;
+  --text-meta: 0.8125rem;    --text-meta--line-height: 1.25rem;
+  --text-body: 0.875rem;     --text-body--line-height: 1.625rem;
+  --text-body-lg: 1rem;      --text-body-lg--line-height: 1.75rem;
+  --text-title: 1.125rem;    --text-title--line-height: 1.75rem;   --text-title--letter-spacing: -0.01em;
+  --text-heading: 1.375rem;  --text-heading--line-height: 1.875rem; --text-heading--letter-spacing: -0.015em;
+
+  /* ========== 色彩：语义命名，6 个核心色 + 派生层级 ==========
+   * 禁止在页面里出现 #fff / #333 这类裸值；一律走 token。
+   */
+  /* neutral（画布 / 表面 / 分隔线） */
+  --color-canvas: #f8f8f7;          /* 页面底（极浅暖灰，保留稿纸感） */
+  --color-surface: #ffffff;         /* 卡片 / 面板 / 弹层 / 当前会话项 */
+  --color-surface-alt: #f0f0ef;     /* 侧栏底 / 用户消息 / 代码块 / 骨架条 */
+  --color-border: #e5e5e5;          /* 发丝分隔线 */
+  --color-border-strong: #d1d1d1;   /* 控件描边 */
+  /* ink（文本层级：三档，不要更多） */
+  --color-ink: #1a1a1a;             /* 主文本 / 消息正文 */
+  --color-ink-muted: #5b6472;       /* 次要文本 / 时间戳 / 提示 */
+  --color-ink-subtle: #667085;      /* 占位符 / 禁用 / 图标弱化 */
+  /* primary（唯一强调色：主操作、当前项、焦点） */
+  --color-primary: #2563eb;
+  --color-primary-hover: #1d4ed8;
+  --color-primary-soft: #eff6ff;    /* 选中项底 / 选区底 */
+  --color-on-primary: #ffffff;      /* primary 上的文字 */
+  /* 语义状态：每色一对（实色 + 软底） */
+  --color-danger: #c0271f;
+  --color-danger-soft: #fef2f2;
+  --color-success: #15803d;
+  --color-success-soft: #f0fdf4;
+  --color-warning: #b45309;
+  --color-warning-soft: #fffbeb;
+  /* 焦点环：只在 :focus-visible 出现 */
+  --color-focus-ring: #2563eb;
+  /* 弹层遮罩 */
+  --color-overlay: rgb(26 26 26 / 0.32);
+
+  /* ========== 间距：4px 基标度（p-1 = 4px … p-6 = 24px …） ==========
+   * 页面里只用 4/8/12/16/24/32/48 步长；13px、18px 这类值视为错误。
+   */
+  --spacing: 0.25rem;
+
+  /* ========== 圆角：三级 + 全圆 ========== */
+  --radius-xs: 3px;    /* 小标签 / 骨架条 */
+  --radius-sm: 5px;    /* 图标按钮 / 菜单项 */
+  --radius-md: 7px;    /* 按钮 / 输入框 / 下拉 */
+  --radius-lg: 10px;   /* 卡片 / 弹层面板 */
+  --radius-xl: 14px;   /* 用户消息块 / 输入区容器 */
+  --radius-full: 9999px;
+
+  /* ========== 阴影：发丝描边为主，投影为辅（重投影是廉价感来源） ========== */
+  --shadow-hairline: 0 0 0 1px oklch(0.235 0.012 255 / 0.06);
+  --shadow-card: 0 1px 2px 0 oklch(0.235 0.012 255 / 0.05), 0 0 0 1px oklch(0.235 0.012 255 / 0.05);
+  --shadow-raised: 0 2px 6px -1px oklch(0.235 0.012 255 / 0.08), 0 0 0 1px oklch(0.235 0.012 255 / 0.06);
+  --shadow-overlay: 0 12px 32px -6px oklch(0.235 0.012 255 / 0.16), 0 0 0 1px oklch(0.235 0.012 255 / 0.08);
+
+  /* ========== 动效：160ms 为主，缓出曲线收尾更稳 ========== */
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out-soft: cubic-bezier(0.65, 0, 0.35, 1);
+  --default-transition-duration: 160ms;
+
+  /* ========== 容器宽度 ========== */
+  --container-form: 32rem;     /* 小弹层（重命名 / 编辑 / 确认） */
+  --container-content: 42rem;  /* 消息正文阅读栏 672px，中文行宽约 38 字 */
+  --container-wide: 84rem;     /* 宽表 / 看板（当前需求未用，留作复用） */
+
+  /* ========== 断点：沿用 Tailwind v4 默认，不改 ==========
+   * sm 40rem(640) / md 48rem(768) / lg 64rem(1024) / xl 80rem(1280)
+   */
+}
+
+/* ========== 基础层：全局一次，页面里不再重复 ========== */
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: var(--text-body);
+    line-height: var(--text-body--line-height);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* 时间、数量、日期一律等宽数字，纵向才对得齐 */
+  time,
+  [data-numeric] {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 键盘焦点必须可见；鼠标点击不出现 */
+  :focus-visible {
+    outline: 2px solid var(--color-focus-ring);
+    outline-offset: 2px;
+    border-radius: var(--radius-xs);
+  }
+
+  ::selection {
+    background-color: var(--color-primary-soft);
+    color: var(--color-ink);
+  }
+
+  /* 尊重系统减少动效偏好 */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
