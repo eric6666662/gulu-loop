@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"gululoop/internal/dal"
 	"gululoop/internal/dal/models"
 	"gululoop/internal/llm"
 
@@ -16,7 +17,7 @@ import (
 )
 
 // providerColumns 显式列名：不用 SELECT *。
-const providerColumns = `id, service_provider, setting_json, created_at, updated_at`
+const providerColumns = `id, service_provider, setting_json, is_active, created_at, updated_at`
 
 // ProviderView 是服务商接口的响应形状（camelCase，api_key 永不出现）。
 // 02-后端设计.md §1.2。
@@ -27,6 +28,7 @@ type ProviderView struct {
 	Model           string     `json:"model"`
 	Models          []ModelRef `json:"models"`
 	HasAPIKey       bool       `json:"hasApiKey"`
+	IsActive        bool       `json:"isActive"`
 	CreatedAt       time.Time  `json:"createdAt"`
 	UpdatedAt       time.Time  `json:"updatedAt"`
 }
@@ -149,9 +151,21 @@ func (ps *ProviderService) Create(ctx context.Context, in ProviderInput) (*Provi
 	}
 
 	now := time.Now()
-	const query = `INSERT INTO x_service_provider (id, service_provider, setting_json, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?)`
-	_, err = ps.db.ExecContext(ctx, query, id, name, string(raw), now, now)
+	// 从 0 个服务商变为 1 个时自动激活（01-需求 #1f 验收 4）。
+	// 无激活状态下新增**不**自动激活（验收 6）——所以判据是"表里一条都没有"，不是"没有激活项"。
+	// MaxOpenConns=1，COUNT 与 INSERT 之间不会被并发写入插队。
+	var existing int
+	if err := ps.db.GetContext(ctx, &existing, `SELECT COUNT(*) FROM x_service_provider`); err != nil {
+		return nil, fmt.Errorf("统计服务商数量: %w", err)
+	}
+	active := 0
+	if existing == 0 {
+		active = 1
+	}
+
+	const query = `INSERT INTO x_service_provider (id, service_provider, setting_json, is_active, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)`
+	_, err = ps.db.ExecContext(ctx, query, id, name, string(raw), active, now, now)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return nil, fmt.Errorf("%w：%s", ErrProviderExists, name)
@@ -198,6 +212,37 @@ func (ps *ProviderService) Update(ctx context.Context, name string, in ProviderI
 		return nil, sql.ErrNoRows // 原样返回，不包装：handler 要用 errors.Is 判定
 	}
 
+	return ps.Get(ctx, name)
+}
+
+// Activate 把某个服务商设为「激活的服务商」（ADR-0015 / 02-后端设计.md §1.9）。
+//
+// 两条 UPDATE 在同一事务里：先清后设。部分唯一索引 uk_x_service_provider_active
+// 在 DB 层兜底"至多一个"——顺序写错会直接报冲突，而不是静默出现两个激活。
+// 不存在时返回 sql.ErrNoRows（handler 映射 404）。
+func (ps *ProviderService) Activate(ctx context.Context, name string) (*ProviderView, error) {
+	err := dal.WithTx(ctx, ps.db, func(ctx context.Context, tx *sqlx.Tx) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE x_service_provider SET is_active = 0 WHERE is_active = 1`); err != nil {
+			return fmt.Errorf("清除旧激活项: %w", err)
+		}
+		res, err := tx.ExecContext(ctx,
+			`UPDATE x_service_provider SET is_active = 1, updated_at = ? WHERE service_provider = ?`,
+			time.Now(), name)
+		if err != nil {
+			return fmt.Errorf("激活服务商 %s: %w", name, err)
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("激活服务商 %s 后取影响行数: %w", name, err)
+		}
+		if affected == 0 {
+			return sql.ErrNoRows
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
 	return ps.Get(ctx, name)
 }
 
@@ -279,6 +324,7 @@ func toProviderView(row models.ServiceProvider) (ProviderView, error) {
 		Model:           setting.Model,
 		Models:          refs,
 		HasAPIKey:       setting.APIKey != "",
+		IsActive:        row.IsActive,
 		CreatedAt:       row.CreatedAt,
 		UpdatedAt:       row.UpdatedAt,
 	}, nil

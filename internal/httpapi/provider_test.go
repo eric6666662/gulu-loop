@@ -247,3 +247,56 @@ func TestDeleteServiceProvider(t *testing.T) {
 		t.Fatalf("删除后列表应为空，实际 %d %s", code, env.Data)
 	}
 }
+
+// TestActivateServiceProvider 激活接口：200 返回该条 / 404 不存在（02-后端设计.md §1.9）。
+func TestActivateServiceProvider(t *testing.T) {
+	srv := newProviderTestServer(t)
+	for _, name := range []string{"deepseek", "relay"} {
+		body := strings.Replace(providerBody, `"serviceProvider":"deepseek"`, `"serviceProvider":"`+name+`"`, 1)
+		if code, env := doJSON(t, http.MethodPost, srv.URL+"/api/v1/service-providers", body); code != http.StatusOK {
+			t.Fatalf("建服务商 %s 失败：%d %+v", name, code, env)
+		}
+	}
+
+	code, env := doJSON(t, http.MethodPost, srv.URL+"/api/v1/service-providers/relay:activate", "")
+	if code != http.StatusOK {
+		t.Fatalf("激活应为 200，实际 %d %+v", code, env)
+	}
+	var got struct {
+		ServiceProvider string `json:"serviceProvider"`
+		IsActive        bool   `json:"isActive"`
+	}
+	if err := json.Unmarshal(env.Data, &got); err != nil {
+		t.Fatalf("解析响应: %v", err)
+	}
+	if got.ServiceProvider != "relay" || !got.IsActive {
+		t.Fatalf("应返回 relay 且 isActive=true，实际 %+v", got)
+	}
+
+	// 列表里恰好一个 isActive，且是 relay
+	_, env = doJSON(t, http.MethodGet, srv.URL+"/api/v1/service-providers", "")
+	var list []struct {
+		ServiceProvider string `json:"serviceProvider"`
+		IsActive        bool   `json:"isActive"`
+	}
+	if err := json.Unmarshal(env.Data, &list); err != nil {
+		t.Fatalf("解析列表: %v", err)
+	}
+	actives := 0
+	for _, p := range list {
+		if p.IsActive {
+			actives++
+			if p.ServiceProvider != "relay" {
+				t.Fatalf("激活项应是 relay，实际 %s", p.ServiceProvider)
+			}
+		}
+	}
+	if actives != 1 {
+		t.Fatalf("列表里应恰好一个 isActive，实际 %d", actives)
+	}
+
+	// 不存在 → 404
+	if code, env := doJSON(t, http.MethodPost, srv.URL+"/api/v1/service-providers/nope:activate", ""); code != http.StatusNotFound {
+		t.Fatalf("不存在应 404，实际 %d %+v", code, env)
+	}
+}

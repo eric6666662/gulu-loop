@@ -67,6 +67,7 @@ type ServiceProvider struct {
 	ID              string    `db:"id" json:"id"`                            // 记录ID（UUIDv7）
 	ServiceProvider string    `db:"service_provider" json:"serviceProvider"` // 服务商名称（唯一）
 	SettingJSON     string    `db:"setting_json" json:"settingJson"`         // 服务商配置（JSON 字符串，如 base_url/api_key 等）
+	IsActive        bool      `db:"is_active" json:"isActive"`               // 是否为「激活的服务商」（ADR-0015：全局恰好 0 或 1 个）
 	CreatedAt       time.Time `db:"created_at" json:"createdAt"`             // 创建时间
 	UpdatedAt       time.Time `db:"updated_at" json:"updatedAt"`             // 更新时间
 }

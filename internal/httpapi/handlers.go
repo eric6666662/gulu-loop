@@ -247,6 +247,29 @@ func (s *Server) testServiceProvider(w http.ResponseWriter, r *http.Request) {
 	s.ok(r.Context(), w, result)
 }
 
+// activateServiceProvider 激活服务商（POST /service-providers/{name}:activate）。
+//
+// 无请求体；成功返回被激活的那一条（前端整条替换、其余 isActive 置 false，不必重拉列表）。
+func (s *Server) activateServiceProvider(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		s.badRequest(r.Context(), w, "缺少服务商名称")
+		return
+	}
+
+	view, err := s.provider.Activate(r.Context(), name)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.notFound(r.Context(), w, "服务商不存在")
+			return
+		}
+		slog.ErrorContext(r.Context(), "激活服务商失败", "service_provider", name, "err", err)
+		s.serverError(r.Context(), w, "内部错误，请查看服务端日志")
+		return
+	}
+	s.ok(r.Context(), w, view)
+}
+
 // isUpstreamError 判断是不是上游失败（llm 包的错误类型）。用 As 而不是类型断言，
 // 这样将来包一层 fmt.Errorf("…: %w") 也不会漏。
 func isUpstreamError(err error) bool {

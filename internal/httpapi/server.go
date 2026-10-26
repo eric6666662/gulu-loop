@@ -89,6 +89,8 @@ func (s *Server) Handler() http.Handler {
 			// 服务商探测：拉取模型列表（新建态用请求体凭证）/ 检测连通（用库内配置）
 			r.Post("/service-providers/models:fetch", s.fetchProviderModels)
 			r.Post("/service-providers/{name}/test", s.testServiceProvider)
+			// 激活服务商（ADR-0015）：需求里没有"取消激活"动作，所以做成单向 :verb
+			r.Post("/service-providers/{name}:activate", s.activateServiceProvider)
 		})
 	})
 
