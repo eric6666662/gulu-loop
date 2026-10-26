@@ -71,8 +71,7 @@ func normalizeError(ctx context.Context, err error) error {
 		return &UpstreamError{Message: "请求已取消"}
 	}
 
-	var apiErr *openai.Error
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*openai.Error](err); ok {
 		if apiErr.StatusCode == http.StatusNotFound {
 			return &UpstreamError{Message: "上游不支持拉取模型列表，请手动填写"}
 		}
@@ -91,9 +90,8 @@ func normalizeError(ctx context.Context, err error) error {
 
 // isDecodeError 判断是不是"响应体不是预期 JSON"（有的兼容层会返回 HTML 错误页）。
 func isDecodeError(err error) bool {
-	var syntaxErr *json.SyntaxError
 	var typeErr *json.UnmarshalTypeError
-	if errors.As(err, &syntaxErr) || errors.As(err, &typeErr) {
+	if _, ok := errors.AsType[*json.SyntaxError](err); ok || errors.As(err, &typeErr) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
