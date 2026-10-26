@@ -6,85 +6,117 @@
 
 ## 项目概况
 
-> 本节由 `/flow-init` 生成 / 刷新；代码演进后重跑 `/flow-init` 即可更新。
+> 本节由 `/flow-init` 生成 / 刷新；代码演进后重跑 `/flow-init` 即可更新。**最后刷新：2026-10-26**。
 
 ## 项目定位
 
-面向单用户的本地 AI 聊天 MVP，支持多服务商（OpenAI 兼容接口）、流式输出、会话历史管理与自动上下文压缩。后续演进方向：Agent / 知识库 / 笔记。
+面向单用户的本地 AI 聊天 MVP：多服务商（OpenAI 兼容端点）、流式对话、会话历史、上下文自动摘要。演进方向：Agent（手搓，第二阶段）/ 知识库 / 笔记。
 
 ## 项目状态
 
-**半成品** · 初始化于 2026-07-XX
-- 数据模型（4 张表）、迁移脚本、HTTP 路由框架、响应工具函数已完成
-- 会话/消息/服务商 CRUD handler 骨架已定义（多数为 TODO）
-- LLM 调用链、流式协议、上下文管理**尚未实现**
-- 前端为占位 HTML，无实际界面
+**半成品**（2026-07 初始化 · 2026-10-26 刷新）
+
+- ✅ 数据模型（4 张表）、迁移、HTTP 框架与统一信封、日志、静态资源服务（含 SPA 回退）
+- ✅ 服务商：后端四接口（列表/新增/更新/删除）+ 前端设置页（列表 / 编辑 / 删除确认）
+- 🟡 会话与消息：只有"读 + 删"（列表、重命名、删除、消息分页与删除）；新建会话、导出、单条消息内容未实现
+- ❌ **LLM 调用链**（`internal/llm` 为空目录；`openai-go` 尚未引入，见 ADR-0014）、流式发送（NDJSON）、上下文拼接与自动摘要、拉取模型列表、检测连通
+- ❌ 前端聊天界面：`ChatArea` 是空壳，会话列表未接入
 
 ## 技术栈
 
+**后端**
+
 - 语言：Go 1.26.1
 - Web 框架：github.com/go-chi/chi/v5 v5.5.0
-- ORM：github.com/jmoiron/sqlx v1.4.0
-- 数据库：modernc.org/sqlite v1.60.1（嵌入式 SQLite，WAL 模式）
+- ORM / 查询：github.com/jmoiron/sqlx v1.4.0
+- 数据库：modernc.org/sqlite v1.60.1（嵌入式 SQLite，WAL 模式，`MaxOpenConns=1`）
 - 迁移：github.com/pressly/goose/v3 v3.29.0
-- UUID：github.com/google/uuid v1.6.0
-- 日志：log/slog + gopkg.in/natefinch/lumberjack.v2
+- UUID：github.com/google/uuid v1.6.0（UUIDv7）
+- 日志：log/slog + gopkg.in/natefinch/lumberjack.v2 v2.2.1
+- LLM 客户端：**github.com/openai/openai-go（待引入）** —— 决策见 `docs/adr/ADR-0014-use-openai-go.md`，全封装在 `internal/llm`
+
+**前端**（`web/`，产物 `web/dist` 由 `web/embed.go` 嵌入二进制）
+
+- Vue 3.5 + TypeScript 5.9 + Vite 7
+- Tailwind CSS v4（`@tailwindcss/vite`，无 `tailwind.config.js`；token 唯一来源 `docs/设计系统/tokens.css`）
+- 图标：lucide-vue-next；Markdown：markdown-it + shiki（任务 5 起使用）
+- 测试：vitest 3 + @vue/test-utils + happy-dom
 
 ## 运行 · 测试 · 构建
 
 | 用途 | 命令 |
 |------|------|
-| 启动 | `go run ./cmd/server` |
-| 测试 | `go test ./...` |
-| 构建 | `go build -o gulu ./cmd/server` |
-| 类型检查 / lint | `go vet ./...` |
+| 启动（后端 + 已构建前端） | `go run ./cmd/server` |
+| 后端测试 | `go test ./...` |
+| 后端类型检查 / lint | `go vet ./...` |
+| 构建二进制 | `go build -o gulu ./cmd/server` |
+| 前端开发（热更新，代理到后端） | `cd web && npm run dev` |
+| 前端构建（含 `vue-tsc` 类型检查） | `cd web && npm run build` |
+| 前端测试 | `cd web && npm run test` |
+| 前端类型检查 | `cd web && npm run typecheck` |
 
 默认监听 `127.0.0.1:1112`，数据目录 `~/.gulu`（可传 `-data-dir` 覆盖）。
+
+> **`web/dist` 已提交进仓库**：`web/embed.go` 用 `//go:embed all:dist` 把它编进二进制，所以 Go 构建不依赖 Node 环境；改前端后必须重跑 `npm run build` 再提交 dist。
 
 ## 目录结构
 
 ```
-cmd/server/main.go        # 入口：解析配置 → 打开 DB → 启动 App
+cmd/server/main.go          # 入口：解析配置 → 打开 DB → 迁移 → 启动 App
 internal/
-  app/app.go              # App 组合：配置 + Store + HTTP Server
-  config/config.go        # 命令行参数解析与校验
+  app/app.go                # App 组合：配置 + *sqlx.DB + HTTP Server
+  config/config.go          # 命令行参数解析与校验
   dal/
-    db.go                 # SQLite 连接（WAL + 单连接）
-    models/core.go        # 数据模型：Conversation / Message / Summary / ServiceProvider
-    repo/                 # 数据访问层（repo 包，TODO 中）
+    db.go                   # SQLite 连接（WAL + 单连接）+ 迁移 + 事务样板 WithTx
+    models/core.go          # Conversation / Message / ConversationSummary / ServiceProvider
+    models/provider.go      # ProviderSetting：setting_json 的编解码（兼容旧格式）
+  service/                  # 业务编排（直连 sqlx，无 repo 层，ADR-0010）
+    conversation.go         # 会话列表 / 取单条 / 重命名 / 级联删除
+    message.go              # 消息分页 / 删除（含计数与摘要锚点维护）
+    provider.go             # 服务商 CRUD + 校验 + 脱敏视图
   httpapi/
-    server.go             # chi Router 构建 + 中间件 + Serve
-    handlers.go           # HTTP Handler（会话/消息/服务商 CRUD，多为 TODO）
-    respond.go            # 统一响应格式（JSON envelope）
-  logger/core.go          # slog 初始化
+    server.go               # chi 路由 + 中间件 + 静态资源（SPA 回退）+ 生命周期
+    handlers.go             # 各业务 handler（按业务域分段）
+    respond.go              # 统一响应信封与错误响应
+  logger/core.go            # slog 初始化
+  llm/                      # 空目录：LLM 客户端待实现（ADR-0014）
+  memory/ session/          # 空目录：预留给第二阶段
 migrations/
-  000001_init.sql         # 建表：服务商 / 会话 / 摘要 / 消息
-  embed.go                # goose embed FS
-web/
-  dist/index.html         # 前端占位（MVP 阶段需替换为实际前端）
-  embed.go                # go:embed 静态资源
+  000001_init.sql           # 建表：服务商 / 会话 / 摘要 / 消息
+  embed.go                  # goose embed FS
+web/                        # Vue 3 + Vite 前端工程
+  src/api/                  # client（拆信封）+ providers
+  src/components/           # layout / chat / settings / dialog / ui
+  src/composables/          # useProviders / useSettingsPane / useToast
+  src/styles/               # tokens.css（从 docs 同步）+ main.css
+  dist/                     # 构建产物，已入库（go:embed 输入）
 docs/
-  需求图.md               # 需求登记表
-  deliverables/
-    mvp-ai-chat/
-      01-需求.md          # MVP AI 聊天需求文档
-GLOSSARY.md               # 项目术语表
-go.mod / go.sum           # Go 模块依赖
+  需求图.md                 # 需求登记表 + 共享代码触点
+  设计稿.md                 # 项目级设计系统（视觉主张 / 组件规范 / 文案基调）
+  设计系统/tokens.css       # 设计 token 唯一事实来源
+  adr/                      # ADR-0001…0014
+  deliverables/mvp-ai-chat/ # 01 需求 / 02 后端·前端·UI 设计 + 原型 / 03 计划
+CLAUDE.md / GLOSSARY.md     # 项目概况（本节）+ 术语表
+README.md                   # 空（待补）
 ```
 
 ## 完成度
 
 | 模块 | 状态 | 说明 |
 |------|------|------|
-| 数据模型 & 迁移 | ✅ 完成 | 4 张表，UUIDv7 ID，WAL 模式 |
-| HTTP 路由框架 | ✅ 完成 | chi + 中间件 + JSON 响应信封 |
-| 会话 CRUD | 🟡 骨架 | handler 定义在，业务逻辑 TODO |
-| 消息 CRUD | 🟡 骨架 | handler 定义在，业务逻辑 TODO |
-| 服务商 CRUD | 🟡 骨架 | handler 定义在，业务逻辑 TODO |
-| LLM 调用链 | ❌ 未实现 | 待 flow-design-backend 设计后实现 |
-| 流式协议（NDJSON） | ❌ 未实现 | 待实现 |
-| 上下文压缩（摘要） | ❌ 未实现 | 待实现 |
-| 前端界面 | ❌ 占位 | index.html 仅为占位 |
+| 数据模型 & 迁移 | ✅ | 4 张表，UUIDv7，WAL，单连接；`WithTx` 事务样板 |
+| HTTP 框架 | ✅ | chi + 中间件 + 统一信封；静态资源按 MIME 正确返回 + SPA 回退 |
+| 服务商 CRUD（后端） | ✅ | 列表/新增/更新/删除；9 条 400 校验；409 重名；`api_key` 永不回传 |
+| 服务商设置（前端） | ✅ | 列表页 + 编辑页（两级）+ 删除确认 + toast + 校验 |
+| 会话管理 | 🟡 部分 | 列表/重命名/删除已实现；**新建会话、导出 Markdown 未实现** |
+| 消息 | 🟡 部分 | 分页列表、删除已实现；**流式发送、单条内容未实现** |
+| LLM 客户端 | ❌ | `internal/llm` 空；`openai-go` 待引入（ADR-0014） |
+| 流式协议（NDJSON） | ❌ | 未实现 |
+| 上下文拼接 / 自动摘要 | ❌ | 未实现 |
+| 拉取模型列表 / 检测连通 | ❌ | 接口 #14 / #15 未实现 |
+| 前端聊天界面 | ❌ | `ChatArea` 空壳；会话列表未接入 |
+| 测试 | ✅ | Go 26 个测试函数（5 包全绿）；前端 47 个 vitest 用例（9 文件全绿） |
+| 版本控制 | ✅ | `main` → `origin`（2026-10-26 初始化，`.agents/` 与 `node_modules/` 不入库） |
 
 <!-- END:FLOW-INIT -->
 
