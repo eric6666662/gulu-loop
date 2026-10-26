@@ -62,8 +62,8 @@ func seedConversation(t *testing.T, db *sqlx.DB, baseURL, apiKey string) (convID
 	if _, err := db.Exec(`INSERT INTO x_conversations (id,title,message_count) VALUES ('c1','测试会话',0)`); err != nil {
 		t.Fatal(err)
 	}
-	setting := fmt.Sprintf(`{"base_url":%q,"api_key":%q,"model":"deepseek-v4-pro","models":[{"id":"deepseek-v4-pro","name":"V4 Pro"}]}`, baseURL, apiKey)
-	if _, err := db.Exec(`INSERT INTO x_service_provider (id, service_provider, setting_json) VALUES ('p1','deepseek',?)`, setting); err != nil {
+	setting := fmt.Sprintf(`{"base_url":%q,"api_key":%q,"model":"deepseek-v4-pro","models":[{"id":"deepseek-v4-pro","name":"V4 Pro"},{"id":"kimi-k2","name":"Kimi K2"}]}`, baseURL, apiKey)
+	if _, err := db.Exec(`INSERT INTO x_service_provider (id, service_provider, setting_json, is_active) VALUES ('p1','deepseek',?,1)`, setting); err != nil {
 		t.Fatal(err)
 	}
 	return "c1"
@@ -608,7 +608,7 @@ func TestSendAutoTitle(t *testing.T) {
 				t.Fatal(err)
 			}
 			setting := fmt.Sprintf(`{"base_url":%q,"api_key":"sk-good","model":"deepseek-v4-pro","models":[{"id":"deepseek-v4-pro"}]}`, baseURL)
-			if _, err := db.Exec(`INSERT INTO x_service_provider (id, service_provider, setting_json) VALUES ('p1','deepseek',?)`, setting); err != nil {
+			if _, err := db.Exec(`INSERT INTO x_service_provider (id, service_provider, setting_json, is_active) VALUES ('p1','deepseek',?,1)`, setting); err != nil {
 				t.Fatal(err)
 			}
 			svc := service.NewMessageService(db, llm.NewClient())
@@ -636,7 +636,7 @@ func TestSendKeepsManualTitle(t *testing.T) {
 		t.Fatal(err)
 	}
 	setting := fmt.Sprintf(`{"base_url":%q,"api_key":"sk-good","model":"deepseek-v4-pro","models":[{"id":"deepseek-v4-pro"}]}`, baseURL)
-	if _, err := db.Exec(`INSERT INTO x_service_provider (id, service_provider, setting_json) VALUES ('p1','deepseek',?)`, setting); err != nil {
+	if _, err := db.Exec(`INSERT INTO x_service_provider (id, service_provider, setting_json, is_active) VALUES ('p1','deepseek',?,1)`, setting); err != nil {
 		t.Fatal(err)
 	}
 	svc := service.NewMessageService(db, llm.NewClient())

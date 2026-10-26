@@ -49,7 +49,10 @@ var ErrMessageNotFound = fmt.Errorf("消息不存在: %w", sql.ErrNoRows)
 type SendRequest struct {
 	ConversationID string
 	Content        string
-	Model          string
+	// ServiceProvider 指定用哪个服务商；必须等于当前激活的服务商（ADR-0015）。
+	// 为空则用激活的服务商。
+	ServiceProvider string
+	Model           string
 	// MessageID 是截断锚点（ADR-0006）：指向 assistant = 重试，指向 user = 编辑后重发
 	MessageID string
 }
@@ -102,17 +105,17 @@ func (ms *MessageService) Send(ctx context.Context, req SendRequest, emit func(S
 		return err
 	}
 
-	provider, setting, err := ms.firstProvider(ctx)
+	provider, setting, err := ms.resolveProvider(ctx, req.ServiceProvider)
 	if err != nil {
 		return err
-	}
-	if provider == "" {
-		return &ValidationError{Message: "没有可用的服务商，请先在服务商设置里添加"}
 	}
 
 	model := strings.TrimSpace(req.Model)
 	if model == "" {
 		model = setting.Model
+	} else if !hasModel(setting.Models, model) {
+		// 前端模型选择器只会给出该服务商清单内的模型；这条是防御后端契约被绕过
+		return &ValidationError{Message: "模型不在该服务商的模型清单中"}
 	}
 
 	if _, loaded := ms.busy.LoadOrStore(req.ConversationID, struct{}{}); loaded {
@@ -405,26 +408,88 @@ func (ms *MessageService) getConversation(ctx context.Context, id string) (*mode
 	return &c, nil
 }
 
-// firstProvider 取第一个服务商（按创建时间）作为发送时的上游。
-//
-// "使用中服务商"在 2026-10-23 被撤销（01-需求 #1f 已删），MVP 的口径是：
-// 按创建时间取第一个服务商，模型用它的默认模型或请求体覆盖值。
-// 没有服务商时返回 ("", 空配置, nil)，由调用方给出可直出的提示。
-func (ms *MessageService) firstProvider(ctx context.Context) (string, models.ProviderSetting, error) {
+// activeProvider 取「激活的服务商」（ADR-0015）。没有激活项时返回空标识，由调用方决定报什么错。
+func (ms *MessageService) activeProvider(ctx context.Context) (string, models.ProviderSetting, error) {
 	var row models.ServiceProvider
-	const query = `SELECT ` + providerColumns + ` FROM x_service_provider ORDER BY created_at LIMIT 1`
+	const query = `SELECT ` + providerColumns + ` FROM x_service_provider WHERE is_active = 1 LIMIT 1`
 	if err := ms.db.GetContext(ctx, &row, query); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", models.ProviderSetting{}, nil
 		}
-		return "", models.ProviderSetting{}, fmt.Errorf("查询服务商: %w", err)
+		return "", models.ProviderSetting{}, fmt.Errorf("查询激活的服务商: %w", err)
 	}
-
 	var setting models.ProviderSetting
 	if err := json.Unmarshal([]byte(row.SettingJSON), &setting); err != nil {
 		return "", models.ProviderSetting{}, fmt.Errorf("解析服务商 %s 的配置: %w", row.ServiceProvider, err)
 	}
 	return row.ServiceProvider, setting, nil
+}
+
+// resolveProvider 定"这次用哪个服务商"（ADR-0015 / 02-后端设计.md §5.2 I）。
+//
+//	未指定          → 激活的服务商；没有激活项 → 400「请先激活一个服务商」
+//	指定 = 激活的   → 用它
+//	指定 ≠ 激活的   → 400「该服务商未激活」（不允许绕过激活直接调用任意服务商）
+//	指定但不存在    → 400「服务商不存在，请重新选择模型」
+func (ms *MessageService) resolveProvider(ctx context.Context, requested string) (string, models.ProviderSetting, error) {
+	active, setting, err := ms.activeProvider(ctx)
+	if err != nil {
+		return "", models.ProviderSetting{}, err
+	}
+
+	requested = strings.TrimSpace(requested)
+	if requested == "" || requested == active {
+		if active == "" {
+			return "", models.ProviderSetting{}, ms.noActiveError(ctx)
+		}
+		return active, setting, nil
+	}
+
+	exists, err := ms.providerExists(ctx, requested)
+	if err != nil {
+		return "", models.ProviderSetting{}, err
+	}
+	if !exists {
+		return "", models.ProviderSetting{}, &ValidationError{Message: "服务商不存在，请重新选择模型"}
+	}
+	if active == "" {
+		// 服务商存在、但一个都没激活：仍然拒绝，不让"没激活"被请求体绕过
+		return "", models.ProviderSetting{}, ms.noActiveError(ctx)
+	}
+	return "", models.ProviderSetting{}, &ValidationError{Message: "该服务商未激活"}
+}
+
+// noActiveError 没有激活项时的 400 文案：
+// 一个服务商都没有 → 引导去添加；有服务商但没激活 → 引导去激活（两种空态的前端横幅也不同）。
+func (ms *MessageService) noActiveError(ctx context.Context) error {
+	var n int
+	if err := ms.db.GetContext(ctx, &n, `SELECT COUNT(*) FROM x_service_provider`); err != nil {
+		return fmt.Errorf("统计服务商数量: %w", err)
+	}
+	if n == 0 {
+		return &ValidationError{Message: "没有可用的服务商，请先在服务商设置里添加"}
+	}
+	return &ValidationError{Message: "请先激活一个服务商"}
+}
+
+// providerExists 服务商是否存在（只查主键，不解析配置）。
+func (ms *MessageService) providerExists(ctx context.Context, name string) (bool, error) {
+	var n int
+	if err := ms.db.GetContext(ctx, &n,
+		`SELECT COUNT(*) FROM x_service_provider WHERE service_provider = ?`, name); err != nil {
+		return false, fmt.Errorf("查询服务商 %s: %w", name, err)
+	}
+	return n > 0, nil
+}
+
+// hasModel 判断模型标识是否在清单内（忽略大小写，与 ProviderService 的校验口径一致）。
+func hasModel(models []models.ModelRef, id string) bool {
+	for _, m := range models {
+		if strings.EqualFold(m.ID, id) {
+			return true
+		}
+	}
+	return false
 }
 
 // buildContext 组装发给上游的上下文（01-需求 #3）：

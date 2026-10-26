@@ -46,7 +46,7 @@ func newSendServer(t *testing.T, apiKey string, deltas ...string) (*httptest.Ser
 	t.Cleanup(up.Close)
 
 	setting := fmt.Sprintf(`{"base_url":%q,"api_key":%q,"model":"deepseek-v4-pro","models":[{"id":"deepseek-v4-pro"}]}`, up.URL+"/v1", apiKey)
-	if _, err := db.Exec(`INSERT INTO x_service_provider (id, service_provider, setting_json) VALUES ('p1','deepseek',?)`, setting); err != nil {
+	if _, err := db.Exec(`INSERT INTO x_service_provider (id, service_provider, setting_json, is_active) VALUES ('p1','deepseek',?,1)`, setting); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO x_conversations (id,title,message_count) VALUES ('c1','测试会话',0)`); err != nil {
@@ -251,5 +251,77 @@ func TestSendMessageRetry(t *testing.T) {
 	}
 	if len(env2.Data.List) != 2 {
 		t.Fatalf("重试后应剩 2 条，实际 %d: %+v", len(env2.Data.List), env2.Data.List)
+	}
+}
+
+// TestSendMessageProviderGuard 请求体里的 serviceProvider 必须等于激活的服务商（ADR-0015）。
+func TestSendMessageProviderGuard(t *testing.T) {
+	db, err := dal.Open(&config.Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := dal.Migrate(t.Context(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO x_conversations (id,title,message_count) VALUES ('c1','t',0)`); err != nil {
+		t.Fatal(err)
+	}
+	setting := `{"base_url":"http://127.0.0.1:1/v1","api_key":"sk-a","model":"m1","models":[{"id":"m1"}]}`
+	for _, row := range []struct {
+		name   string
+		active int
+	}{{"official", 0}, {"relay", 1}} {
+		if _, err := db.Exec(
+			`INSERT INTO x_service_provider (id, service_provider, setting_json, is_active) VALUES (?,?,?,?)`,
+			"id-"+row.name, row.name, setting, row.active); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := httptest.NewServer(New(&config.Config{}, db).Handler())
+	t.Cleanup(srv.Close)
+
+	// 指定未激活的服务商 → 400 该服务商未激活
+	res, body := postSend(t, srv.URL+"/api/v1/conversations/c1/messages", `{"content":"hi","serviceProvider":"official","model":"m1"}`)
+	if res.StatusCode != http.StatusBadRequest || !strings.Contains(body, "该服务商未激活") {
+		t.Fatalf("应为 400 该服务商未激活，实际 %d %s", res.StatusCode, body)
+	}
+
+	// 指定不存在的服务商 → 400 服务商不存在
+	res, body = postSend(t, srv.URL+"/api/v1/conversations/c1/messages", `{"content":"hi","serviceProvider":"ghost","model":"m1"}`)
+	if res.StatusCode != http.StatusBadRequest || !strings.Contains(body, "服务商不存在") {
+		t.Fatalf("应为 400 服务商不存在，实际 %d %s", res.StatusCode, body)
+	}
+
+	// 模型不在清单 → 400
+	res, body = postSend(t, srv.URL+"/api/v1/conversations/c1/messages", `{"content":"hi","serviceProvider":"relay","model":"gpt-4o"}`)
+	if res.StatusCode != http.StatusBadRequest || !strings.Contains(body, "模型不在该服务商的模型清单中") {
+		t.Fatalf("应为 400 模型不在清单，实际 %d %s", res.StatusCode, body)
+	}
+}
+
+// TestSendMessageNoActive 有服务商但没有激活 → 400 请先激活一个服务商。
+func TestSendMessageNoActive(t *testing.T) {
+	db, err := dal.Open(&config.Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := dal.Migrate(t.Context(), db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO x_conversations (id,title,message_count) VALUES ('c1','t',0)`); err != nil {
+		t.Fatal(err)
+	}
+	setting := `{"base_url":"http://127.0.0.1:1/v1","api_key":"sk-a","model":"m1","models":[{"id":"m1"}]}`
+	if _, err := db.Exec(`INSERT INTO x_service_provider (id, service_provider, setting_json) VALUES ('p1','official',?)`, setting); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(&config.Config{}, db).Handler())
+	t.Cleanup(srv.Close)
+
+	res, body := postSend(t, srv.URL+"/api/v1/conversations/c1/messages", `{"content":"hi"}`)
+	if res.StatusCode != http.StatusBadRequest || !strings.Contains(body, "请先激活一个服务商") {
+		t.Fatalf("应为 400 请先激活一个服务商，实际 %d %s", res.StatusCode, body)
 	}
 }

@@ -359,9 +359,12 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {
 
 // sendMessageReq 发送消息请求体（02-后端设计.md §1.3）
 type sendMessageReq struct {
-	Content   string `json:"content"`   // 用户消息内容（必填）
-	Model     string `json:"model"`     // 可选：覆盖服务商默认模型
-	MessageID string `json:"messageId"` // 截断锚点（重试/编辑，任务 7）
+	Content string `json:"content"` // 用户消息内容（必填）
+	// ServiceProvider 可选：必须等于当前激活的服务商（ADR-0015）。与 Model 一起
+	// 标识"用哪个服务商的哪个模型"；为空则用激活服务商的默认模型。
+	ServiceProvider string `json:"serviceProvider"`
+	Model           string `json:"model"`     // 可选：覆盖服务商默认模型（必须在它的清单内）
+	MessageID       string `json:"messageId"` // 截断锚点（重试/编辑，任务 7）
 }
 
 // ndjsonEvent NDJSON 事件（每行一个 JSON）
@@ -428,10 +431,11 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err := s.message.Send(ctx, service.SendRequest{
-		ConversationID: id,
-		Content:        req.Content,
-		Model:          req.Model,
-		MessageID:      req.MessageID,
+		ConversationID:  id,
+		Content:         req.Content,
+		ServiceProvider: req.ServiceProvider,
+		Model:           req.Model,
+		MessageID:       req.MessageID,
 	}, func(e service.SendEvent) error {
 		// 每种事件只带契约里约定的字段（§1.3），不把内部结构整包透出去
 		switch e.Type {
