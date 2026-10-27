@@ -14,16 +14,17 @@
 
 ## 项目状态
 
-**半成品**（2026-07 初始化 · 2026-10-26 刷新）
+**mvp-ai-chat 已交付**（2026-10-27 · 04-审查通过 + 05-验证全绿）
 
-- ✅ 数据模型（4 张表）、迁移、HTTP 框架与统一信封、日志、静态资源服务（含 SPA 回退）
-- ✅ 服务商：后端四接口（列表/新增/更新/删除）+ 前端设置页（列表 / 编辑 / 删除确认）
-- 🟡 会话：列表（分页/滚动加载）、新建、重命名、删除已完成；导出未实现
-- 🟡 消息：只有"读 + 删"（分页列表、删除）；流式发送与单条内容未实现
-- ✅ LLM 客户端（`internal/llm`，`openai-go` 全封装）：拉取模型列表、检测连通
-- ✅ 流式发送（NDJSON：start/delta/done/error，含 `message_count`/`last_message_time` 维护、同会话 409 并发守卫、`-llm-timeout` 60s）
+- ✅ 数据模型（4 张表 + `is_active` 列）、2 个迁移、HTTP 框架与统一信封、日志、静态资源（含 SPA 回退）
+- ✅ 服务商：CRUD + 检测连通 + 拉取模型 + **激活**（`:activate`，空表自动激活/删除不接替，ADR-0015）
+- ✅ 会话：列表、新建、重命名、删除（级联）、导出 Markdown、标题自动生成、草稿态后端建会话（ADR-0017）
+- ✅ 消息：分页列表、删除、**流式发送**、重试/编辑后重发（`type=regenerate`）、单条内容（复制）
+- ✅ LLM 客户端（`internal/llm`，`openai-go` 全封装）：`Stream` / `FetchModels` / `Summarize`，`WithMaxRetries(0)`
+- ✅ 流式发送（NDJSON：**meta/message/done/error**，ADR-0017；`POST /api/v1/messages`；`message_count`/`last_message_time` 维护、同会话 409 守卫、`-llm-timeout` 60s）
 - ✅ 上下文拼接（≤10 条全发；>10 条 = 摘要 + 最近 10 条）与自动摘要（≥10 条后异步生成、upsert）
-- ✅ 前端聊天界面：侧栏、会话头、消息区、输入区与流式发送（含停止生成、草稿态）
+- ✅ 激活决定发送（`activeProvider`，4 条 400 校验）；模型选择带服务商身份 + 回落痕迹（ADR-0016）
+- ✅ 前端聊天界面：侧栏、会话头、`?c=` 深链、消息区（Markdown+高亮）、输入与流式（停止/草稿）、模型切换、无激活横幅
 
 ## 技术栈
 
@@ -82,7 +83,7 @@ internal/
     handlers.go             # 各业务 handler（按业务域分段）
     respond.go              # 统一响应信封与错误响应
   logger/core.go            # slog 初始化
-  llm/                      # 空目录：LLM 客户端待实现（ADR-0014）
+  llm/                      # LLM 客户端（openai-go 全封装）：Stream/FetchModels/Summarize（ADR-0014）
   memory/ session/          # 空目录：预留给第二阶段
 migrations/
   000001_init.sql           # 建表：服务商 / 会话 / 摘要 / 消息
@@ -111,10 +112,12 @@ README.md                   # 空（待补）
 | HTTP 框架 | ✅ | chi + 中间件 + 统一信封；静态资源按 MIME 正确返回 + SPA 回退 |
 | 服务商 CRUD（后端） | ✅ | 列表/新增/更新/删除；9 条 400 校验；409 重名；`api_key` 永不回传 |
 | 服务商设置（前端） | ✅ | 列表页 + 编辑页（两级）+ 删除确认 + 拉取模型弹层 + 检测连通 toast + 校验 |
-| 会话管理 | ✅ | 列表（分页/滚动加载）、新建、重命名、删除（级联 + 确认弹层）、导出 Markdown、**标题自动生成**（首条消息前 20 字）已完成 |
-| 消息 | ✅ | 分页列表、删除、流式发送、重试 / 编辑后重发、**单条内容（复制）** 已完成 |
-| LLM 客户端 | 🟡 部分 | `internal/llm`：`FetchModels` 已实现（`openai-go` v1.12.0，全封装、关重试）；`Stream` / `Summarize` 未实现 |
-| 流式协议（NDJSON） | ✅ | start/delta/done/error；开流前 4xx、开流后一律 error 事件 |
+| **激活的服务商** | ✅ | `is_active` 列（部分唯一索引）+ `:activate` 接口 + 空表自动激活/删除不接替；前端行尾激活按钮；发送用激活服务商的 base_url/api_key（ADR-0015） |
+| **模型选择（带服务商身份）** | ✅ | `useModelSelection`：模型值 = `{serviceProvider, model}`、激活变化自动回落 + 痕迹（ADR-0016）；模型选择器只列激活服务商清单 |
+| 会话管理 | ✅ | 列表（分页/滚动加载）、新建、重命名、删除（级联 + 确认弹层）、导出 Markdown、标题自动生成、**草稿态后端建会话**（ADR-0017） |
+| 消息 | ✅ | 分页列表、删除、流式发送（meta/message）、重试 / 编辑后重发（`type=regenerate`）、单条内容（复制） |
+| LLM 客户端 | ✅ | `internal/llm`：`Stream` / `FetchModels` / `Summarize` 三方法（`openai-go` v1.12.0，全封装、`WithMaxRetries(0)`；ADR-0014） |
+| 流式协议（NDJSON） | ✅ | **meta/message/done/error**（ADR-0017）；开流前 4xx、开流后一律 error 事件；`POST /api/v1/messages` |
 | 上下文拼接 / 自动摘要 | ✅ | ≤10 条全发；>10 条带摘要；摘要异步生成 + upsert（锚点=最新 assistant） |
 | 拉取模型列表 / 检测连通 | ✅ | 接口 #14 / #15 已实现（前端弹层 + ⋯ 菜单） |
 | 前端聊天界面 | ✅ | 侧栏、会话头、`?c=` 深链、消息区（Markdown + 高亮 + 四种态）、输入区与流式发送（停止生成 / 草稿态）、会话内模型切换、**无服务商横幅 / 键盘可达 / 文案纪律** 已完成 |
