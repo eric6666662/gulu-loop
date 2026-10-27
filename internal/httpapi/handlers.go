@@ -480,8 +480,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 	// 开流后：只能走 error 事件（HTTP 状态已固定 200）；带 conversationId
 	// 让前端把新建的会话插进侧栏（ADR-0017）
 	message := err.Error()
-	var ve *service.ValidationError
-	if errors.As(err, &ve) {
+	if ve, ok := errors.AsType[*service.ValidationError](err); ok {
 		message = ve.Message
 	}
 	slog.Warn("发送消息中断",
