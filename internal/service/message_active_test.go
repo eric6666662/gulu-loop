@@ -68,7 +68,7 @@ func TestSendUsesActiveProvider(t *testing.T) {
 	seedProviderRow(t, db, "relay", baseB, "sk-b", "model-b", true)
 
 	svc := service.NewMessageService(db, llm.NewClient())
-	if err := svc.Send(context.Background(), service.SendRequest{ConversationID: convID, Content: "你好"}, func(service.SendEvent) error { return nil }); err != nil {
+	if err := svc.Send(context.Background(), service.SendRequest{Type: "send", ConversationID: convID, Content: "你好"}, func(service.SendEvent) error { return nil }); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -94,7 +94,7 @@ func TestSendNoActiveProvider(t *testing.T) {
 	seedProviderRow(t, db, "official", base, "sk-a", "model-a", false)
 
 	svc := service.NewMessageService(db, llm.NewClient())
-	err := svc.Send(context.Background(), service.SendRequest{ConversationID: convID, Content: "你好"}, func(service.SendEvent) error { return nil })
+	err := svc.Send(context.Background(), service.SendRequest{Type: "send", ConversationID: convID, Content: "你好"}, func(service.SendEvent) error { return nil })
 
 	assertValidationError(t, err, "请先激活一个服务商")
 }
@@ -162,9 +162,10 @@ func TestSendWithExplicitProviderAndModel(t *testing.T) {
 	var gotModel string
 	svc := service.NewMessageService(db, llm.NewClient())
 	err := svc.Send(context.Background(), service.SendRequest{
+		Type:           "send",
 		ConversationID: convID, Content: "你好", ServiceProvider: "relay", Model: "model-b",
 	}, func(e service.SendEvent) error {
-		if e.Type == "start" {
+		if e.Type == "meta" {
 			gotModel = e.Model
 		}
 		return nil

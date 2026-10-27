@@ -357,52 +357,51 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request) {
 	s.ok(r.Context(), w, messagesResponse{List: messages, HasMore: hasMore})
 }
 
-// sendMessageReq 发送消息请求体（02-后端设计.md §1.3）
+// sendMessageReq 发送消息请求体（02-后端设计.md §1.3 / ADR-0017）
 type sendMessageReq struct {
-	Content string `json:"content"` // 用户消息内容（必填）
-	// ServiceProvider 可选：必须等于当前激活的服务商（ADR-0015）。与 Model 一起
-	// 标识"用哪个服务商的哪个模型"；为空则用激活服务商的默认模型。
+	Type string `json:"type"` // send | regenerate
+	// ConversationID: send 可选（无则后端新建会话）；regenerate 必填
+	ConversationID string `json:"conversationId"`
+	Content        string `json:"content"` // 用户消息内容（必填）
+	// ServiceProvider: 必须等于当前激活的服务商（ADR-0015）；为空用激活的
 	ServiceProvider string `json:"serviceProvider"`
-	Model           string `json:"model"`     // 可选：覆盖服务商默认模型（必须在它的清单内）
-	MessageID       string `json:"messageId"` // 截断锚点（重试/编辑，任务 7）
+	Model           string `json:"model"` // 必须在该服务商清单内；为空用默认模型
+	// UserMessageID: regenerate 的截断锚点；send 不得携带
+	UserMessageID string `json:"userMessageId"`
+	// AssistantMessageID: regenerate 的配对校验（可空）；send 不得携带
+	AssistantMessageID string `json:"assistantMessageId"`
 }
 
-// ndjsonEvent NDJSON 事件（每行一个 JSON）
+// ndjsonEvent NDJSON 事件（每行一个 JSON；ADR-0017）
 type ndjsonEvent struct {
 	Type               string `json:"type"`
-	Content            string `json:"content,omitempty"`
 	ConversationID     string `json:"conversationId,omitempty"`
+	Title              string `json:"title,omitempty"`           // meta：会话标题
+	Content            string `json:"content,omitempty"`         // message：正文增量
+	ThinkingContent    string `json:"thinkingContent,omitempty"` // message：思考增量
 	UserMessageID      string `json:"userMessageId,omitempty"`
 	AssistantMessageID string `json:"assistantMessageId,omitempty"`
 	Seq                int64  `json:"seq,omitempty"`
 	Model              string `json:"model,omitempty"`
 	ServiceProvider    string `json:"serviceProvider,omitempty"`
 	MessageCount       int    `json:"messageCount,omitempty"`
-	Message            string `json:"message,omitempty"`
+	UpdatedAt          string `json:"updatedAt,omitempty"` // done：assistant 消息更新时间
+	Message            string `json:"message,omitempty"`   // error：错误文案
 }
 
 // sendMessage 发送消息并以 NDJSON 流式返回助手回复
 //
-//	POST /api/v1/conversations/{id}/messages
-//	请求：{content, model?, messageId?}；响应：application/x-ndjson
-//	事件：start → delta* → done（失败时为 error）
+//	POST /api/v1/messages（ADR-0017；原 POST /conversations/{id}/messages 已废弃）
+//	请求：{type, conversationId?, content, serviceProvider?, model?, userMessageId?, assistantMessageId?}
+//	响应：application/x-ndjson
+//	事件：meta → message* → done（失败时为 error）
 //
-// 关键约定（§1.3）：开流前的错误一律 JSON 4xx 且不写流；一旦写出 start，
-// HTTP 状态固定 200，之后所有失败只能走 error 事件。
+// 关键约定（§1.3）：开流前的错误一律 JSON 4xx 且不写流；一旦写出 meta，
+// HTTP 状态固定 200，之后所有失败只能走 error 事件（带 conversationId）。
 func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
-	if id == "" {
-		s.badRequest(r.Context(), w, "缺少会话 id")
-		return
-	}
-
 	var req sendMessageReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.badRequest(r.Context(), w, "请求体格式错误")
-		return
-	}
-	if req.MessageID == "" && strings.TrimSpace(req.Content) == "" {
-		s.badRequest(r.Context(), w, "content 不能为空")
 		return
 	}
 
@@ -410,12 +409,17 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	started := false
+	// convID 由 meta 事件带回（可能新建）；error 事件要用它
+	convID := req.ConversationID
 	flusher, _ := w.(http.Flusher)
 	writeEvent := func(e ndjsonEvent) error {
 		if !started {
 			w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
 			w.WriteHeader(http.StatusOK)
 			started = true
+		}
+		if e.Type == "meta" && e.ConversationID != "" {
+			convID = e.ConversationID
 		}
 		line, err := json.Marshal(e)
 		if err != nil {
@@ -431,32 +435,36 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err := s.message.Send(ctx, service.SendRequest{
-		ConversationID:  id,
-		Content:         req.Content,
-		ServiceProvider: req.ServiceProvider,
-		Model:           req.Model,
-		MessageID:       req.MessageID,
+		Type:               req.Type,
+		ConversationID:     req.ConversationID,
+		Content:            req.Content,
+		ServiceProvider:    req.ServiceProvider,
+		Model:              req.Model,
+		UserMessageID:      req.UserMessageID,
+		AssistantMessageID: req.AssistantMessageID,
 	}, func(e service.SendEvent) error {
 		// 每种事件只带契约里约定的字段（§1.3），不把内部结构整包透出去
 		switch e.Type {
-		case "start":
+		case "meta":
 			return writeEvent(ndjsonEvent{
-				Type:               "start",
-				ConversationID:     id,
+				Type:               "meta",
+				ConversationID:     e.ConversationID,
+				Title:              e.Title,
 				UserMessageID:      e.UserMessageID,
 				AssistantMessageID: e.AssistantMessageID,
 				Seq:                e.Seq,
 				Model:              e.Model,
 				ServiceProvider:    e.ServiceProvider,
 			})
-		case "delta":
-			return writeEvent(ndjsonEvent{Type: "delta", Content: e.Content})
+		case "message":
+			return writeEvent(ndjsonEvent{Type: "message", Content: e.Content, ThinkingContent: e.ThinkingContent})
 		default: // done
 			return writeEvent(ndjsonEvent{
 				Type:               "done",
 				AssistantMessageID: e.AssistantMessageID,
 				Seq:                e.Seq,
 				MessageCount:       e.MessageCount,
+				UpdatedAt:          e.UpdatedAt,
 			})
 		}
 	})
@@ -469,7 +477,8 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 开流后：只能走 error 事件（HTTP 状态已固定 200）
+	// 开流后：只能走 error 事件（HTTP 状态已固定 200）；带 conversationId
+	// 让前端把新建的会话插进侧栏（ADR-0017）
 	message := err.Error()
 	var ve *service.ValidationError
 	if errors.As(err, &ve) {
@@ -477,13 +486,12 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Warn("发送消息中断",
 		"request_id", middleware.GetReqID(ctx),
-		"conversation_id", id,
+		"conversation_id", convID,
 		"err", err,
 	)
-	_ = writeEvent(ndjsonEvent{Type: "error", ConversationID: id, Message: message})
+	_ = writeEvent(ndjsonEvent{Type: "error", ConversationID: convID, Message: message})
 }
 
-// writeSendError 映射开流前的错误（JSON 4xx/5xx，不写流）。
 func (s *Server) writeSendError(w http.ResponseWriter, r *http.Request, err error) {
 	ctx := r.Context()
 

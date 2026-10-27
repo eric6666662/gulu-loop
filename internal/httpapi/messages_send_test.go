@@ -105,7 +105,7 @@ func postSend(t *testing.T, url, body string) (*http.Response, string) {
 func TestSendMessageStream(t *testing.T) {
 	srv, _ := newSendServer(t, "sk-good", "泛型版", "参数化。")
 
-	res, body := postSend(t, srv.URL+"/api/v1/conversations/c1/messages", `{"content":"帮我把快排改成泛型"}`)
+	res, body := postSend(t, srv.URL+"/api/v1/messages", `{"type":"send","conversationId":"c1","content":"帮我把快排改成泛型"}`)
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("应为 200，实际 %d %s", res.StatusCode, body)
 	}
@@ -115,16 +115,16 @@ func TestSendMessageStream(t *testing.T) {
 
 	events := readNDJSON(t, body)
 	if len(events) != 4 {
-		t.Fatalf("应有 4 个事件（start + 2 delta + done），实际 %d: %s", len(events), body)
+		t.Fatalf("应有 4 个事件（meta + 2 message + done），实际 %d: %s", len(events), body)
 	}
-	if events[0]["type"] != "start" || events[0]["assistantMessageId"] == "" || events[0]["userMessageId"] == "" {
-		t.Fatalf("start 事件字段不符: %v", events[0])
+	if events[0]["type"] != "meta" || events[0]["assistantMessageId"] == "" || events[0]["userMessageId"] == "" {
+		t.Fatalf("meta 事件字段不符: %v", events[0])
 	}
 	if events[0]["model"] != "deepseek-v4-pro" || events[0]["serviceProvider"] != "deepseek" {
-		t.Fatalf("start 事件 model/provider 不符: %v", events[0])
+		t.Fatalf("meta 事件 model/provider 不符: %v", events[0])
 	}
-	if events[1]["type"] != "delta" || events[1]["content"] != "泛型版" || events[2]["content"] != "参数化。" {
-		t.Fatalf("delta 不符: %v %v", events[1], events[2])
+	if events[1]["type"] != "message" || events[1]["content"] != "泛型版" || events[2]["content"] != "参数化。" {
+		t.Fatalf("message 不符: %v %v", events[1], events[2])
 	}
 	last := events[len(events)-1]
 	if last["type"] != "done" || last["messageCount"].(float64) != 2 {
@@ -141,10 +141,10 @@ func TestSendMessageValidation(t *testing.T) {
 		wantCode int
 		wantMsg  string
 	}{
-		{"内容为空", "/api/v1/conversations/c1/messages", `{"content":"   "}`, http.StatusBadRequest, "content 不能为空"},
-		{"请求体不是 JSON", "/api/v1/conversations/c1/messages", "nope", http.StatusBadRequest, "请求体格式错误"},
-		{"会话不存在", "/api/v1/conversations/nope/messages", `{"content":"hi"}`, http.StatusNotFound, "会话不存在"},
-		{"messageId 不存在", "/api/v1/conversations/c1/messages", `{"content":"hi","messageId":"nope"}`, http.StatusNotFound, "消息不存在"},
+		{"内容为空", "/api/v1/messages", `{"type":"send","conversationId":"c1","content":"   "}`, http.StatusBadRequest, "content 不能为空"},
+		{"请求体不是 JSON", "/api/v1/messages", "nope", http.StatusBadRequest, "请求体格式错误"},
+		{"会话不存在", "/api/v1/messages", `{"type":"send","conversationId":"nope","content":"hi"}`, http.StatusNotFound, "会话不存在"},
+		{"userMessageId 不存在", "/api/v1/messages", `{"type":"regenerate","conversationId":"c1","content":"hi","userMessageId":"nope"}`, http.StatusBadRequest, "userMessageId 指向的消息不存在或角色不支持"},
 	}
 
 	for _, c := range cases {
@@ -181,7 +181,7 @@ func TestSendMessageNoProvider(t *testing.T) {
 	srv := httptest.NewServer(New(&config.Config{}, db).Handler())
 	t.Cleanup(srv.Close)
 
-	res, body := postSend(t, srv.URL+"/api/v1/conversations/c1/messages", `{"content":"hi"}`)
+	res, body := postSend(t, srv.URL+"/api/v1/messages", `{"type":"send","conversationId":"c1","content":"hi"}`)
 	if res.StatusCode != http.StatusBadRequest || !strings.Contains(body, "没有可用的服务商") {
 		t.Fatalf("应为 400 + 没有可用的服务商，实际 %d %s", res.StatusCode, body)
 	}
@@ -191,13 +191,13 @@ func TestSendMessageNoProvider(t *testing.T) {
 func TestSendMessageUpstreamError(t *testing.T) {
 	srv, _ := newSendServer(t, "sk-bad", "不会用到")
 
-	res, body := postSend(t, srv.URL+"/api/v1/conversations/c1/messages", `{"content":"hi"}`)
+	res, body := postSend(t, srv.URL+"/api/v1/messages", `{"type":"send","conversationId":"c1","content":"hi"}`)
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("开流后应保持 200，实际 %d %s", res.StatusCode, body)
 	}
 	events := readNDJSON(t, body)
 	if len(events) < 2 {
-		t.Fatalf("应有 start + error，实际 %s", body)
+		t.Fatalf("应有 meta + error，实际 %s", body)
 	}
 	last := events[len(events)-1]
 	if last["type"] != "error" {
@@ -212,24 +212,25 @@ func TestSendMessageUpstreamError(t *testing.T) {
 func TestSendMessageRetry(t *testing.T) {
 	srv, _ := newSendServer(t, "sk-good", "重答")
 
-	// 先正常发一轮，拿到 assistantMessageId
-	_, body := postSend(t, srv.URL+"/api/v1/conversations/c1/messages", `{"content":"第一问"}`)
+	// 先正常发一轮，拿到 userMessageId + assistantMessageId
+	_, body := postSend(t, srv.URL+"/api/v1/messages", `{"type":"send","conversationId":"c1","content":"第一问"}`)
 	events := readNDJSON(t, body)
+	userID, _ := events[0]["userMessageId"].(string)
 	assistantID, _ := events[0]["assistantMessageId"].(string)
-	if assistantID == "" {
-		t.Fatalf("没拿到 assistantMessageId: %s", body)
+	if userID == "" || assistantID == "" {
+		t.Fatalf("没拿到 userMessageId / assistantMessageId: %s", body)
 	}
 
-	// 再发一条，然后重试第一条 assistant
-	postSend(t, srv.URL+"/api/v1/conversations/c1/messages", `{"content":"第二问"}`)
+	// 再发一条，然后重试第一条（regenerate：锚点是 user 消息）
+	postSend(t, srv.URL+"/api/v1/messages", `{"type":"send","conversationId":"c1","content":"第二问"}`)
 
-	res, body := postSend(t, srv.URL+"/api/v1/conversations/c1/messages", `{"messageId":"`+assistantID+`"}`)
+	res, body := postSend(t, srv.URL+"/api/v1/messages", `{"type":"regenerate","conversationId":"c1","content":"第一问","userMessageId":"`+userID+`","assistantMessageId":"`+assistantID+`"}`)
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("应为 200，实际 %d %s", res.StatusCode, body)
 	}
 	retryEvents := readNDJSON(t, body)
-	if retryEvents[0]["type"] != "start" {
-		t.Fatalf("应以 start 开头: %s", body)
+	if retryEvents[0]["type"] != "meta" {
+		t.Fatalf("应以 meta 开头: %s", body)
 	}
 
 	// 截断后：只剩「第一问 + 重答」两条（第二问及其后的消息都被删掉）
@@ -282,19 +283,19 @@ func TestSendMessageProviderGuard(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	// 指定未激活的服务商 → 400 该服务商未激活
-	res, body := postSend(t, srv.URL+"/api/v1/conversations/c1/messages", `{"content":"hi","serviceProvider":"official","model":"m1"}`)
+	res, body := postSend(t, srv.URL+"/api/v1/messages", `{"type":"send","conversationId":"c1","content":"hi","serviceProvider":"official","model":"m1"}`)
 	if res.StatusCode != http.StatusBadRequest || !strings.Contains(body, "该服务商未激活") {
 		t.Fatalf("应为 400 该服务商未激活，实际 %d %s", res.StatusCode, body)
 	}
 
 	// 指定不存在的服务商 → 400 服务商不存在
-	res, body = postSend(t, srv.URL+"/api/v1/conversations/c1/messages", `{"content":"hi","serviceProvider":"ghost","model":"m1"}`)
+	res, body = postSend(t, srv.URL+"/api/v1/messages", `{"type":"send","conversationId":"c1","content":"hi","serviceProvider":"ghost","model":"m1"}`)
 	if res.StatusCode != http.StatusBadRequest || !strings.Contains(body, "服务商不存在") {
 		t.Fatalf("应为 400 服务商不存在，实际 %d %s", res.StatusCode, body)
 	}
 
 	// 模型不在清单 → 400
-	res, body = postSend(t, srv.URL+"/api/v1/conversations/c1/messages", `{"content":"hi","serviceProvider":"relay","model":"gpt-4o"}`)
+	res, body = postSend(t, srv.URL+"/api/v1/messages", `{"type":"send","conversationId":"c1","content":"hi","serviceProvider":"relay","model":"gpt-4o"}`)
 	if res.StatusCode != http.StatusBadRequest || !strings.Contains(body, "模型不在该服务商的模型清单中") {
 		t.Fatalf("应为 400 模型不在清单，实际 %d %s", res.StatusCode, body)
 	}
@@ -320,7 +321,7 @@ func TestSendMessageNoActive(t *testing.T) {
 	srv := httptest.NewServer(New(&config.Config{}, db).Handler())
 	t.Cleanup(srv.Close)
 
-	res, body := postSend(t, srv.URL+"/api/v1/conversations/c1/messages", `{"content":"hi"}`)
+	res, body := postSend(t, srv.URL+"/api/v1/messages", `{"type":"send","conversationId":"c1","content":"hi"}`)
 	if res.StatusCode != http.StatusBadRequest || !strings.Contains(body, "请先激活一个服务商") {
 		t.Fatalf("应为 400 请先激活一个服务商，实际 %d %s", res.StatusCode, body)
 	}

@@ -76,7 +76,8 @@ func (s *Server) Handler() http.Handler {
 
 			// 消息管理（message 为会话的子资源：列表 / 删除）
 			r.Get("/conversations/{id}/messages", s.listMessages)
-			r.Post("/conversations/{id}/messages", s.sendMessage)
+			// 发送流（ADR-0017）：conversationId 移到 body 且可选，路径不再带 id
+			r.Post("/messages", s.sendMessage)
 			r.Get("/conversations/{id}/messages/{messageId}", s.getMessageContent)
 			r.Delete("/conversations/{id}/messages/{messageId}", s.deleteMessage)
 

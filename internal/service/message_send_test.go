@@ -91,7 +91,7 @@ func TestSend(t *testing.T) {
 	svc := service.NewMessageService(db, llm.NewClient())
 
 	var events []service.SendEvent
-	err := svc.Send(context.Background(), service.SendRequest{ConversationID: convID, Content: "帮我把快排改成泛型"}, func(e service.SendEvent) error {
+	err := svc.Send(context.Background(), service.SendRequest{Type: "send", ConversationID: convID, Content: "帮我把快排改成泛型"}, func(e service.SendEvent) error {
 		events = append(events, e)
 		return nil
 	})
@@ -99,14 +99,14 @@ func TestSend(t *testing.T) {
 		t.Fatalf("Send: %v", err)
 	}
 
-	// 事件序列：start → delta×3 → done
-	if events[0].Type != "start" || events[len(events)-1].Type != "done" {
+	// 事件序列：meta → message×3 → done
+	if events[0].Type != "meta" || events[len(events)-1].Type != "done" {
 		t.Fatalf("事件序列不符: %+v", events)
 	}
 	var text strings.Builder
 	deltaCount := 0
 	for _, e := range events {
-		if e.Type == "delta" {
+		if e.Type == "message" {
 			deltaCount++
 			text.WriteString(e.Content)
 		}
@@ -159,7 +159,7 @@ func TestSendModelOverride(t *testing.T) {
 	convID := seedConversation(t, db, baseURL, "sk-good")
 	svc := service.NewMessageService(db, llm.NewClient())
 
-	if err := svc.Send(context.Background(), service.SendRequest{ConversationID: convID, Content: "hi", Model: "kimi-k2"}, func(service.SendEvent) error { return nil }); err != nil {
+	if err := svc.Send(context.Background(), service.SendRequest{Type: "send", ConversationID: convID, Content: "hi", Model: "kimi-k2"}, func(service.SendEvent) error { return nil }); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	if *lastModel != "kimi-k2" {
@@ -176,7 +176,7 @@ func TestSendValidation(t *testing.T) {
 		convID := seedConversation(t, db, baseURL, "sk-good")
 		svc := service.NewMessageService(db, llm.NewClient())
 
-		err := svc.Send(context.Background(), service.SendRequest{ConversationID: convID, Content: "   "}, func(service.SendEvent) error { return nil })
+		err := svc.Send(context.Background(), service.SendRequest{Type: "send", ConversationID: convID, Content: "   "}, func(service.SendEvent) error { return nil })
 		var ve *service.ValidationError
 		if !errors.As(err, &ve) || ve.Message != "content 不能为空" {
 			t.Fatalf("应为 content 不能为空，实际 %v", err)
@@ -188,7 +188,7 @@ func TestSendValidation(t *testing.T) {
 		seedConversation(t, db, baseURL, "sk-good")
 		svc := service.NewMessageService(db, llm.NewClient())
 
-		err := svc.Send(context.Background(), service.SendRequest{ConversationID: "nope", Content: "hi"}, func(service.SendEvent) error { return nil })
+		err := svc.Send(context.Background(), service.SendRequest{Type: "send", ConversationID: "nope", Content: "hi"}, func(service.SendEvent) error { return nil })
 		if !errors.Is(err, sql.ErrNoRows) {
 			t.Fatalf("应为 sql.ErrNoRows，实际 %v", err)
 		}
@@ -201,7 +201,7 @@ func TestSendValidation(t *testing.T) {
 		}
 		svc := service.NewMessageService(db, llm.NewClient())
 
-		err := svc.Send(context.Background(), service.SendRequest{ConversationID: "c1", Content: "hi"}, func(service.SendEvent) error { return nil })
+		err := svc.Send(context.Background(), service.SendRequest{Type: "send", ConversationID: "c1", Content: "hi"}, func(service.SendEvent) error { return nil })
 		var ve *service.ValidationError
 		if !errors.As(err, &ve) || !strings.Contains(ve.Message, "没有可用的服务商") {
 			t.Fatalf("应为没有可用的服务商，实际 %v", err)
@@ -216,7 +216,7 @@ func TestSendUpstreamFail(t *testing.T) {
 	convID := seedConversation(t, db, baseURL, "sk-bad") // 坏 key
 	svc := service.NewMessageService(db, llm.NewClient())
 
-	err := svc.Send(context.Background(), service.SendRequest{ConversationID: convID, Content: "hi"}, func(service.SendEvent) error { return nil })
+	err := svc.Send(context.Background(), service.SendRequest{Type: "send", ConversationID: convID, Content: "hi"}, func(service.SendEvent) error { return nil })
 	var ue *llm.UpstreamError
 	if !errors.As(err, &ue) || !strings.Contains(ue.Message, "上游返回 401") {
 		t.Fatalf("应为 UpstreamError，实际 %v", err)
@@ -247,8 +247,8 @@ func TestSendBusy(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	go func() {
-		_ = svc.Send(context.Background(), service.SendRequest{ConversationID: convID, Content: "第一句"}, func(e service.SendEvent) error {
-			if e.Type == "start" {
+		_ = svc.Send(context.Background(), service.SendRequest{Type: "send", ConversationID: convID, Content: "第一句"}, func(e service.SendEvent) error {
+			if e.Type == "meta" {
 				close(started)
 				<-release
 			}
@@ -258,10 +258,10 @@ func TestSendBusy(t *testing.T) {
 	select {
 	case <-started:
 	case <-time.After(3 * time.Second):
-		t.Fatal("第一次发送 3s 内没有发出 start 事件")
+		t.Fatal("第一次发送 3s 内没有发出 meta 事件")
 	}
 
-	err := svc.Send(context.Background(), service.SendRequest{ConversationID: convID, Content: "第二句"}, func(service.SendEvent) error { return nil })
+	err := svc.Send(context.Background(), service.SendRequest{Type: "send", ConversationID: convID, Content: "第二句"}, func(service.SendEvent) error { return nil })
 	if !errors.Is(err, service.ErrConversationBusy) {
 		t.Fatalf("应为 ErrConversationBusy，实际 %v", err)
 	}
@@ -300,7 +300,14 @@ func TestSendRetry(t *testing.T) {
 	svc := service.NewMessageService(db, llm.NewClient())
 
 	var events []service.SendEvent
-	err := svc.Send(context.Background(), service.SendRequest{ConversationID: "c1", MessageID: "m4"}, func(e service.SendEvent) error {
+	// regenerate：锚点是 user 消息 m3，重试送原文"第二问"（ADR-0017：后端不查原内容）
+	err := svc.Send(context.Background(), service.SendRequest{
+		Type:               "regenerate",
+		ConversationID:     "c1",
+		Content:            "第二问",
+		UserMessageID:      "m3",
+		AssistantMessageID: "m4",
+	}, func(e service.SendEvent) error {
 		events = append(events, e)
 		return nil
 	})
@@ -331,8 +338,8 @@ func TestSendRetry(t *testing.T) {
 	if count != 4 {
 		t.Fatalf("message_count 应重算为 4，实际 %d", count)
 	}
-	if events[0].Type != "start" || events[0].Seq != 4 {
-		t.Fatalf("start 事件 seq 应为 4: %+v", events[0])
+	if events[0].Type != "meta" || events[0].Seq != 4 {
+		t.Fatalf("meta 事件 seq 应为 4: %+v", events[0])
 	}
 	if *lastModel == "" {
 		t.Fatal("应调用上游")
@@ -347,10 +354,12 @@ func TestSendEdit(t *testing.T) {
 	seedThread(t, db)
 	svc := service.NewMessageService(db, llm.NewClient())
 
+	// regenerate：锚点是 user 消息 m3，编辑送改后内容（ADR-0017：重试与编辑同一条路径）
 	err := svc.Send(context.Background(), service.SendRequest{
+		Type:           "regenerate",
 		ConversationID: "c1",
-		MessageID:      "m3",
 		Content:        "改过的第二问",
+		UserMessageID:  "m3",
 	}, func(service.SendEvent) error { return nil })
 	if err != nil {
 		t.Fatalf("Send(edit): %v", err)
@@ -372,20 +381,19 @@ func TestSendEdit(t *testing.T) {
 	}
 }
 
-// TestSendMessageIDErrors messageId 不存在 / 角色不支持 / 编辑缺 content / 重试找不到 user。
+// TestSendMessageIDErrors userMessageId 不存在 / 角色不支持 / 编辑缺 content（新契约下都归 400）。
 func TestSendMessageIDErrors(t *testing.T) {
 	baseURL, _, _ := sseServer(t, "ok")
 
 	cases := []struct {
-		name       string
-		messageID  string
-		content    string
-		wantNoRows bool
-		wantMsg    string
+		name      string
+		userMsgID string
+		content   string
+		wantMsg   string
 	}{
-		{"不存在", "nope", "", true, ""},
-		{"角色不支持", "sys1", "", false, "messageId 指向的消息角色不支持"},
-		{"编辑缺 content", "m3", "   ", false, "content 不能为空"},
+		{"userMessageId 不存在", "nope", "hi", "userMessageId 指向的消息不存在或角色不支持"},
+		{"userMessageId 角色不支持", "sys1", "hi", "userMessageId 指向的消息不存在或角色不支持"},
+		{"编辑缺 content", "m3", "   ", "content 不能为空"},
 	}
 
 	for _, c := range cases {
@@ -398,35 +406,17 @@ func TestSendMessageIDErrors(t *testing.T) {
 			}
 			svc := service.NewMessageService(db, llm.NewClient())
 
-			err := svc.Send(context.Background(), service.SendRequest{ConversationID: "c1", MessageID: c.messageID, Content: c.content}, func(service.SendEvent) error { return nil })
-			if c.wantNoRows {
-				if !errors.Is(err, service.ErrMessageNotFound) {
-					t.Fatalf("应为 ErrMessageNotFound，实际 %v", err)
-				}
-				return
-			}
+			err := svc.Send(context.Background(), service.SendRequest{
+				Type:           "regenerate",
+				ConversationID: "c1",
+				Content:        c.content,
+				UserMessageID:  c.userMsgID,
+			}, func(service.SendEvent) error { return nil })
 			var ve *service.ValidationError
 			if !errors.As(err, &ve) || ve.Message != c.wantMsg {
 				t.Fatalf("应为 %q，实际 %v", c.wantMsg, err)
 			}
 		})
-	}
-}
-
-// TestSendRetryNoUserBefore 重试时前面没有 user 消息 → 400。
-func TestSendRetryNoUserBefore(t *testing.T) {
-	baseURL, _, _ := sseServer(t, "ok")
-	db := newSendDB(t)
-	seedConversation(t, db, baseURL, "sk-good")
-	if _, err := db.Exec(`INSERT INTO x_messages (id,conversation_id,seq,role,content) VALUES ('a1','c1',1,'assistant','孤儿回复')`); err != nil {
-		t.Fatal(err)
-	}
-	svc := service.NewMessageService(db, llm.NewClient())
-
-	err := svc.Send(context.Background(), service.SendRequest{ConversationID: "c1", MessageID: "a1"}, func(service.SendEvent) error { return nil })
-	var ve *service.ValidationError
-	if !errors.As(err, &ve) || !strings.Contains(ve.Message, "找不到可重试") {
-		t.Fatalf("应为找不到可重试的用户消息，实际 %v", err)
 	}
 }
 
@@ -482,7 +472,7 @@ func TestSendContextShort(t *testing.T) {
 	seedThread(t, db) // 4 条
 	svc := service.NewMessageService(db, llm.NewClient())
 
-	if err := svc.Send(context.Background(), service.SendRequest{ConversationID: "c1", Content: "第五问"}, func(service.SendEvent) error { return nil }); err != nil {
+	if err := svc.Send(context.Background(), service.SendRequest{Type: "send", ConversationID: "c1", Content: "第五问"}, func(service.SendEvent) error { return nil }); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -523,7 +513,7 @@ func TestSendContextWithSummary(t *testing.T) {
 	}
 	svc := service.NewMessageService(db, llm.NewClient())
 
-	if err := svc.Send(context.Background(), service.SendRequest{ConversationID: "c1", Content: "新问题"}, func(service.SendEvent) error { return nil }); err != nil {
+	if err := svc.Send(context.Background(), service.SendRequest{Type: "send", ConversationID: "c1", Content: "新问题"}, func(service.SendEvent) error { return nil }); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 
@@ -549,7 +539,7 @@ func TestSummaryTriggeredAfter10(t *testing.T) {
 
 	// 连发 5 轮 = 10 条消息
 	for i := 0; i < 5; i++ {
-		if err := svc.Send(ctx, service.SendRequest{ConversationID: "c1", Content: fmt.Sprintf("问%d", i)}, func(service.SendEvent) error { return nil }); err != nil {
+		if err := svc.Send(ctx, service.SendRequest{Type: "send", ConversationID: "c1", Content: fmt.Sprintf("问%d", i)}, func(service.SendEvent) error { return nil }); err != nil {
 			t.Fatalf("Send: %v", err)
 		}
 	}
@@ -613,7 +603,7 @@ func TestSendAutoTitle(t *testing.T) {
 			}
 			svc := service.NewMessageService(db, llm.NewClient())
 
-			if err := svc.Send(context.Background(), service.SendRequest{ConversationID: "c1", Content: c.content}, func(service.SendEvent) error { return nil }); err != nil {
+			if err := svc.Send(context.Background(), service.SendRequest{Type: "send", ConversationID: "c1", Content: c.content}, func(service.SendEvent) error { return nil }); err != nil {
 				t.Fatalf("Send: %v", err)
 			}
 
@@ -641,7 +631,7 @@ func TestSendKeepsManualTitle(t *testing.T) {
 	}
 	svc := service.NewMessageService(db, llm.NewClient())
 
-	if err := svc.Send(context.Background(), service.SendRequest{ConversationID: "c1", Content: "这是一句很长很长的话用来测试标题不会被覆盖"}, func(service.SendEvent) error { return nil }); err != nil {
+	if err := svc.Send(context.Background(), service.SendRequest{Type: "send", ConversationID: "c1", Content: "这是一句很长很长的话用来测试标题不会被覆盖"}, func(service.SendEvent) error { return nil }); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 

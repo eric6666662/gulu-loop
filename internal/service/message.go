@@ -45,32 +45,40 @@ var ErrConversationBusy = errors.New("该会话正在生成回复")
 // 包着 sql.ErrNoRows，方便调用方统一用 errors.Is 判断"没找到"。
 var ErrMessageNotFound = fmt.Errorf("消息不存在: %w", sql.ErrNoRows)
 
-// SendRequest 是一次发送请求。
+// SendRequest 是一次发送请求（02-后端设计.md §1.3 / ADR-0017）。
 type SendRequest struct {
+	// Type: "send"（正常发送，conversationId 可选无则新建）| "regenerate"（重试/编辑重发）
+	Type string
+	// ConversationID: send 可选（无则后端新建）；regenerate 必填
 	ConversationID string
 	Content        string
-	// ServiceProvider 指定用哪个服务商；必须等于当前激活的服务商（ADR-0015）。
-	// 为空则用激活的服务商。
+	// ServiceProvider 指定用哪个服务商；必须等于当前激活的服务商（ADR-0015）
 	ServiceProvider string
 	Model           string
-	// MessageID 是截断锚点（ADR-0006）：指向 assistant = 重试，指向 user = 编辑后重发
-	MessageID string
+	// UserMessageID: regenerate 的截断锚点（从它的 seq 起全删）；send 不得携带
+	UserMessageID string
+	// AssistantMessageID: regenerate 的配对校验（可空）；send 不得携带
+	AssistantMessageID string
 }
 
-// SendEvent 是发送过程中抛给调用方（handler → NDJSON）的事件。
+// SendEvent 是发送过程中抛给调用方（handler → NDJSON）的事件（ADR-0017）。
 //
-// start: AssistantMessageID / Seq / Model / ServiceProvider
-// delta: Content
-// done:  AssistantMessageID / Seq / MessageCount
+// meta:    ConversationID / Title / UserMessageID / AssistantMessageID / Seq / Model / ServiceProvider
+// message: Content 或 ThinkingContent（一个非空）
+// done:    AssistantMessageID / Seq / MessageCount / UpdatedAt
 type SendEvent struct {
-	Type               string // start | delta | done
-	Content            string
+	Type               string // meta | message | done
+	ConversationID     string
+	Title              string // meta：会话标题（新建时是自动截的前 20 字）
+	Content            string // message：正文增量
+	ThinkingContent    string // message：思考增量
 	UserMessageID      string
 	AssistantMessageID string
 	Seq                int64
 	Model              string
 	ServiceProvider    string
 	MessageCount       int
+	UpdatedAt          string // done：assistant 消息更新时间（RFC3339）
 }
 
 // 上下文与摘要（01-需求 #3 / #4）
@@ -95,54 +103,54 @@ const (
 // 上游失败时 user 消息保留、assistant 不写入，错误原样返回（handler 转 error 事件）。
 // 事务里绝不放 LLM 调用（§3.1 规则 3）。
 func (ms *MessageService) Send(ctx context.Context, req SendRequest, emit func(SendEvent) error) error {
-	if _, err := ms.getConversation(ctx, req.ConversationID); err != nil {
+	// 1. 先解析服务商与模型（不依赖会话存在）——这样"无激活服务商"的 400
+	//    发生在建会话之前，不会留下孤儿会话（ADR-0017）
+	provider, setting, err := ms.resolveProvider(ctx, req.ServiceProvider)
+	if err != nil {
 		return err
 	}
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = setting.Model
+	} else if !hasModel(setting.Models, model) {
+		return &ValidationError{Message: "模型不在该服务商的模型清单中"}
+	}
 
-	// 先定"发什么、要不要截断"（ADR-0006 的 messageId 三态）
+	// 2. 按 type 分派：send 可能新建会话；regenerate 校验配对并给截断点
 	plan, err := ms.planSend(ctx, req)
 	if err != nil {
 		return err
 	}
 
-	provider, setting, err := ms.resolveProvider(ctx, req.ServiceProvider)
+	// 3. 同会话互斥（02-后端设计.md §4）
+	if _, loaded := ms.busy.LoadOrStore(plan.conversationID, struct{}{}); loaded {
+		return ErrConversationBusy
+	}
+	defer ms.busy.Delete(plan.conversationID)
+
+	// 4. 截断（regenerate）：删掉该问答对及其后，再重追新 user 消息
+	if plan.truncateSeq > 0 {
+		if err := ms.truncateFrom(ctx, plan.conversationID, plan.truncateSeq); err != nil {
+			return err
+		}
+	}
+
+	// 5. 追加 user 消息（首条且标题为空 → appendMessage 里自动生成前 20 字标题）
+	userMsg, err := ms.appendMessage(ctx, plan.conversationID, models.Message{
+		Role:    models.RoleUser,
+		Content: plan.content,
+	})
 	if err != nil {
 		return err
 	}
 
-	model := strings.TrimSpace(req.Model)
-	if model == "" {
-		model = setting.Model
-	} else if !hasModel(setting.Models, model) {
-		// 前端模型选择器只会给出该服务商清单内的模型；这条是防御后端契约被绕过
-		return &ValidationError{Message: "模型不在该服务商的模型清单中"}
+	// 6. 取会话标题（meta 事件要回给前端，取代"标题为空就重拉列表"的绕路）
+	title, err := ms.conversationTitle(ctx, plan.conversationID)
+	if err != nil {
+		return err
 	}
 
-	if _, loaded := ms.busy.LoadOrStore(req.ConversationID, struct{}{}); loaded {
-		return ErrConversationBusy
-	}
-	defer ms.busy.Delete(req.ConversationID)
-
-	// 截断（重试 / 编辑）：删掉锚点及其后所有消息，并重算计数与最后消息时间
-	if plan.truncateSeq > 0 {
-		if err := ms.truncateFrom(ctx, req.ConversationID, plan.truncateSeq); err != nil {
-			return err
-		}
-	}
-
-	userMessageID := plan.userID
-	if plan.appendUser {
-		userMsg, err := ms.appendMessage(ctx, req.ConversationID, models.Message{
-			Role:    models.RoleUser,
-			Content: plan.content,
-		})
-		if err != nil {
-			return err
-		}
-		userMessageID = userMsg.ID
-	}
-
-	chatMessages, err := ms.buildContext(ctx, req.ConversationID)
+	chatMessages, err := ms.buildContext(ctx, plan.conversationID)
 	if err != nil {
 		return err
 	}
@@ -156,14 +164,18 @@ func (ms *MessageService) Send(ctx context.Context, req SendRequest, emit func(S
 	}
 	var maxSeq int64
 	if err := ms.db.GetContext(ctx, &maxSeq,
-		`SELECT COALESCE(MAX(seq), 0) FROM x_messages WHERE conversation_id = ?`, req.ConversationID); err != nil {
-		return fmt.Errorf("取会话 %s 的最大 seq: %w", req.ConversationID, err)
+		`SELECT COALESCE(MAX(seq), 0) FROM x_messages WHERE conversation_id = ?`, plan.conversationID); err != nil {
+		return fmt.Errorf("取会话 %s 的最大 seq: %w", plan.conversationID, err)
 	}
 	assistantSeq := maxSeq + 1
 
+	// 7. 发出 meta：会话 id / 标题 / user 消息 id / assistant 消息 id / seq / 模型 / 服务商
+	//    （regenerate 时 userMessageId 是**新的** id——原 user 消息已被删掉重追）
 	if err := emit(SendEvent{
-		Type:               "start",
-		UserMessageID:      userMessageID,
+		Type:               "meta",
+		ConversationID:     plan.conversationID,
+		Title:              title,
+		UserMessageID:      userMsg.ID,
 		AssistantMessageID: assistantID,
 		Seq:                assistantSeq,
 		Model:              model,
@@ -172,6 +184,7 @@ func (ms *MessageService) Send(ctx context.Context, req SendRequest, emit func(S
 		return err
 	}
 
+	// 8. 流式调 LLM，每收到一段 delta → 发出 message（content / thinkingContent 各一路）
 	var text, thinking strings.Builder
 	startedAt := time.Now()
 	_, streamErr := ms.llm.Stream(ctx, llm.StreamRequest{
@@ -182,12 +195,13 @@ func (ms *MessageService) Send(ctx context.Context, req SendRequest, emit func(S
 	}, func(e llm.StreamEvent) error {
 		if e.ThinkingDelta != "" {
 			thinking.WriteString(e.ThinkingDelta)
+			return emit(SendEvent{Type: "message", ThinkingContent: e.ThinkingDelta})
 		}
 		if e.Delta == "" {
 			return nil
 		}
 		text.WriteString(e.Delta)
-		return emit(SendEvent{Type: "delta", Content: e.Delta})
+		return emit(SendEvent{Type: "message", Content: e.Delta})
 	})
 	if streamErr != nil {
 		return streamErr
@@ -198,7 +212,8 @@ func (ms *MessageService) Send(ctx context.Context, req SendRequest, emit func(S
 		thinkingDuration = time.Since(startedAt).Milliseconds()
 	}
 
-	assistantMsg, err := ms.appendMessage(ctx, req.ConversationID, models.Message{
+	// 9. 落库 assistant 消息
+	assistantMsg, err := ms.appendMessage(ctx, plan.conversationID, models.Message{
 		ID:               assistantID,
 		Seq:              assistantSeq,
 		Role:             models.RoleAssistant,
@@ -212,9 +227,10 @@ func (ms *MessageService) Send(ctx context.Context, req SendRequest, emit func(S
 		return err
 	}
 
-	// 摘要：落库后**异步**触发（独立 context，不继承请求 ctx；失败只记日志）
-	go ms.summarizeAsync(req.ConversationID, provider, setting, model)
+	// 10. 摘要：落库后**异步**触发（独立 context，不继承请求 ctx；失败只记日志）
+	go ms.summarizeAsync(plan.conversationID, provider, setting, model)
 
+	// 11. done：带 updatedAt 与 messageCount，前端可直接更新侧栏（省一次请求）
 	return emit(SendEvent{
 		Type:               "done",
 		AssistantMessageID: assistantMsg.ID,
@@ -222,70 +238,127 @@ func (ms *MessageService) Send(ctx context.Context, req SendRequest, emit func(S
 		Model:              model,
 		ServiceProvider:    provider,
 		MessageCount:       int(assistantMsg.Total),
+		UpdatedAt:          assistantMsg.UpdatedAt.Format(time.RFC3339),
 	})
 }
 
-// sendPlan 是"这次发送要做什么"的结论（ADR-0006）。
+// sendPlan 是"这次发送要做什么"的结论（ADR-0017）。
 type sendPlan struct {
-	content     string // 要发给上游的最后一条 user 内容
-	appendUser  bool   // 是否新插一条 user 消息（重试时复用已有的）
-	truncateSeq int64  // >0 表示先删掉 seq >= truncateSeq 的消息
-	userID      string // 重试时沿用原 user 消息的 id（start 事件要回给前端）
+	conversationID string // 已解析（send 无 id 时是新建的）
+	content        string // 要发给上游的 user 内容（后端不查原内容，前端送什么用什么）
+	truncateSeq    int64  // >0 表示先删掉 seq >= truncateSeq 的消息（regenerate）
 }
 
-// planSend 解析 messageId 的三态语义（02-后端设计.md §1.3 / ADR-0006）：
+// planSend 按 type 分派（02-后端设计.md §1.3 / ADR-0017）：
 //
-//	不带 messageId        → 追加新消息
-//	指向 assistant        → 重试：截断该条及其后，用它之前最近的 user 内容重发
-//	指向 user             → 编辑后重发：截断该条及其后，用请求体 content 重发
-//	指向 system / tool    → 400
+//	send：       无 conversationId → 新建会话；有 → 校验会话存在。不截断。
+//	regenerate： 校验 conversationId 存在 + userMessageId 是本会话 user 消息 +
+//	            assistantMessageId 配对（可空）；截断点 = userMessageId 的 seq。
+//
+// type 与 messageId 的互斥在各自分支里校验（矛盾组合直接 400）。
 func (ms *MessageService) planSend(ctx context.Context, req SendRequest) (sendPlan, error) {
 	content := strings.TrimSpace(req.Content)
-
-	if req.MessageID == "" {
-		if content == "" {
-			return sendPlan{}, &ValidationError{Message: "content 不能为空"}
-		}
-		return sendPlan{content: content, appendUser: true}, nil
+	if content == "" {
+		return sendPlan{}, &ValidationError{Message: "content 不能为空"}
 	}
 
-	var anchor models.Message
-	const query = `SELECT ` + messageColumns + ` FROM x_messages WHERE conversation_id = ? AND id = ?`
-	if err := ms.db.GetContext(ctx, &anchor, query, req.ConversationID, req.MessageID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return sendPlan{}, ErrMessageNotFound
+	switch req.Type {
+	case "send":
+		if req.UserMessageID != "" || req.AssistantMessageID != "" {
+			return sendPlan{}, &ValidationError{Message: "type=send 不应携带 messageId"}
 		}
-		return sendPlan{}, fmt.Errorf("查询锚点消息 %s: %w", req.MessageID, err)
-	}
-
-	switch anchor.Role {
-	case models.RoleAssistant:
-		var prev models.Message
-		const prevQuery = `SELECT ` + messageColumns + ` FROM x_messages
-			WHERE conversation_id = ? AND seq < ? AND role = 'user'
-			ORDER BY seq DESC LIMIT 1`
-		if err := ms.db.GetContext(ctx, &prev, prevQuery, req.ConversationID, anchor.Seq); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return sendPlan{}, &ValidationError{Message: "找不到可重试的用户消息"}
+		convID := strings.TrimSpace(req.ConversationID)
+		if convID == "" {
+			// 草稿态：后端建会话（01-需求 #5b，ADR-0017）。标题在追加 user 消息时自动生成。
+			newID, err := ms.createConversation(ctx)
+			if err != nil {
+				return sendPlan{}, err
 			}
-			return sendPlan{}, fmt.Errorf("查询可重试的用户消息: %w", err)
+			convID = newID
+		} else if _, err := ms.getConversation(ctx, convID); err != nil {
+			return sendPlan{}, err
 		}
+		return sendPlan{conversationID: convID, content: content}, nil
+
+	case "regenerate":
+		if strings.TrimSpace(req.ConversationID) == "" {
+			return sendPlan{}, &ValidationError{Message: "缺少 conversationId"}
+		}
+		if strings.TrimSpace(req.UserMessageID) == "" {
+			return sendPlan{}, &ValidationError{Message: "缺少 userMessageId"}
+		}
+		if _, err := ms.getConversation(ctx, req.ConversationID); err != nil {
+			return sendPlan{}, err
+		}
+
+		userMsg, err := ms.anchorMessage(ctx, req.ConversationID, req.UserMessageID)
+		if err != nil {
+			return sendPlan{}, err
+		}
+		if userMsg.Role != models.RoleUser {
+			return sendPlan{}, &ValidationError{Message: "userMessageId 指向的消息不存在或角色不支持"}
+		}
+
+		if asstID := strings.TrimSpace(req.AssistantMessageID); asstID != "" {
+			asstMsg, err := ms.anchorMessage(ctx, req.ConversationID, asstID)
+			if err != nil {
+				// 配对校验：assistant 不存在或不属于本会话都算不匹配
+				if ve, ok := err.(*ValidationError); ok && ve.Message == "userMessageId 指向的消息不存在或角色不支持" {
+					return sendPlan{}, &ValidationError{Message: "assistantMessageId 与 userMessageId 不匹配"}
+				}
+				return sendPlan{}, err
+			}
+			if asstMsg.Role != models.RoleAssistant || asstMsg.Seq <= userMsg.Seq {
+				return sendPlan{}, &ValidationError{Message: "assistantMessageId 与 userMessageId 不匹配"}
+			}
+		}
+
 		return sendPlan{
-			content:     prev.Content,
-			appendUser:  false,
-			truncateSeq: anchor.Seq,
-			userID:      prev.ID,
+			conversationID: req.ConversationID,
+			content:        content,
+			truncateSeq:    userMsg.Seq, // 从 user 消息起全删（含它、其后 assistant、后续）
 		}, nil
 
-	case models.RoleUser:
-		if content == "" {
-			return sendPlan{}, &ValidationError{Message: "content 不能为空"}
-		}
-		return sendPlan{content: content, appendUser: true, truncateSeq: anchor.Seq}, nil
-
 	default:
-		return sendPlan{}, &ValidationError{Message: "messageId 指向的消息角色不支持"}
+		return sendPlan{}, &ValidationError{Message: "type 只能是 send 或 regenerate"}
 	}
+}
+
+// anchorMessage 按 id 查一条消息；不存在返回 ValidationError。
+func (ms *MessageService) anchorMessage(ctx context.Context, conversationID, messageID string) (models.Message, error) {
+	var msg models.Message
+	const q = `SELECT ` + messageColumns + ` FROM x_messages WHERE conversation_id = ? AND id = ?`
+	if err := ms.db.GetContext(ctx, &msg, q, conversationID, messageID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return models.Message{}, &ValidationError{Message: "userMessageId 指向的消息不存在或角色不支持"}
+		}
+		return models.Message{}, fmt.Errorf("查询锚点消息 %s: %w", messageID, err)
+	}
+	return msg, nil
+}
+
+// createConversation 新建空会话（send 无 conversationId 时；ADR-0017）。
+func (ms *MessageService) createConversation(ctx context.Context) (string, error) {
+	id, err := models.NewUUID()
+	if err != nil {
+		return "", fmt.Errorf("生成会话 id: %w", err)
+	}
+	now := time.Now()
+	const q = `INSERT INTO x_conversations (id, title, message_count, created_at, updated_at)
+		VALUES (?, '', 0, ?, ?)`
+	if _, err := ms.db.ExecContext(ctx, q, id, now, now); err != nil {
+		return "", fmt.Errorf("新建会话: %w", err)
+	}
+	return id, nil
+}
+
+// conversationTitle 取会话标题（meta 事件用；新建时已在 appendMessage 里生成）。
+func (ms *MessageService) conversationTitle(ctx context.Context, conversationID string) (string, error) {
+	var title string
+	if err := ms.db.GetContext(ctx, &title, `SELECT title FROM x_conversations WHERE id = ?`, conversationID); err != nil {
+		return "", fmt.Errorf("查询会话 %s 标题: %w", conversationID, err)
+	}
+	return title, nil
 }
 
 // truncateFrom 删除 seq >= fromSeq 的消息，并重算会话的计数与最后消息时间。
@@ -331,9 +404,10 @@ func autoTitle(content string) string {
 
 // appendedMessage 是一次写入的结果（事件里要用 id / seq / 会话总数）。
 type appendedMessage struct {
-	ID    string
-	Seq   int64
-	Total int64
+	ID        string
+	Seq       int64
+	Total     int64
+	UpdatedAt time.Time
 }
 
 // appendMessage 在**一个事务**里写入消息并维护会话的计数与最后消息时间。
@@ -362,6 +436,7 @@ func (ms *MessageService) appendMessage(ctx context.Context, conversationID stri
 		out.ID, out.Seq = id, seq
 
 		now := time.Now()
+		out.UpdatedAt = now
 		const insert = `INSERT INTO x_messages
 			(id, conversation_id, seq, role, content, service_provider, model, thinking_content, thinking_duration, created_at, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
