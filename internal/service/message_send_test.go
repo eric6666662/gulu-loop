@@ -643,3 +643,59 @@ func TestSendKeepsManualTitle(t *testing.T) {
 		t.Fatalf("手动标题被覆盖了: %q", title)
 	}
 }
+
+// TestSendRegeneratePairingMismatch assistantMessageId 配对校验的三种不匹配（ADR-0017 §1.3）。
+func TestSendRegeneratePairingMismatch(t *testing.T) {
+	baseURL, _, _ := sseServer(t, "ok")
+
+	cases := []struct {
+		name     string
+		seed     func(t *testing.T, db *sqlx.DB) string // 返回 assistantMessageId
+		wantMsg  string
+	}{
+		{
+			name: "assistant 不存在",
+			seed: func(t *testing.T, db *sqlx.DB) string { return "ghost" },
+			wantMsg: "assistantMessageId 与 userMessageId 不匹配",
+		},
+		{
+			name: "assistant 角色是 user",
+			seed: func(t *testing.T, db *sqlx.DB) string {
+				// m1 是 user(seq=1)；用它当 assistantMessageId → 角色检查失败
+				return "m1"
+			},
+			wantMsg: "assistantMessageId 与 userMessageId 不匹配",
+		},
+		{
+			name: "assistant seq 在 user 之前",
+			seed: func(t *testing.T, db *sqlx.DB) string {
+				// m2 是 assistant(seq=2)、锚点 user=m3(seq=3) → 角色 OK 但 seq 在前
+				return "m2"
+			},
+			wantMsg: "assistantMessageId 与 userMessageId 不匹配",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			db := newSendDB(t)
+			seedConversation(t, db, baseURL, "sk-good")
+			seedThread(t, db)
+			asstID := c.seed(t, db)
+			svc := service.NewMessageService(db, llm.NewClient())
+
+			err := svc.Send(context.Background(), service.SendRequest{
+				Type:               "regenerate",
+				ConversationID:     "c1",
+				Content:            "第二问",
+				UserMessageID:      "m3",
+				AssistantMessageID: asstID,
+			}, func(service.SendEvent) error { return nil })
+
+			var ve *service.ValidationError
+			if !errors.As(err, &ve) || ve.Message != c.wantMsg {
+				t.Fatalf("应为 %q，实际 %v", c.wantMsg, err)
+			}
+		})
+	}
+}

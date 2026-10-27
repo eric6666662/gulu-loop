@@ -293,6 +293,9 @@ func (ms *MessageService) planSend(ctx context.Context, req SendRequest) (sendPl
 
 		userMsg, err := ms.anchorMessage(ctx, req.ConversationID, req.UserMessageID)
 		if err != nil {
+			if errors.Is(err, errAnchorNotFound) {
+				return sendPlan{}, &ValidationError{Message: "userMessageId 指向的消息不存在或角色不支持"}
+			}
 			return sendPlan{}, err
 		}
 		if userMsg.Role != models.RoleUser {
@@ -303,7 +306,7 @@ func (ms *MessageService) planSend(ctx context.Context, req SendRequest) (sendPl
 			asstMsg, err := ms.anchorMessage(ctx, req.ConversationID, asstID)
 			if err != nil {
 				// 配对校验：assistant 不存在或不属于本会话都算不匹配
-				if ve, ok := err.(*ValidationError); ok && ve.Message == "userMessageId 指向的消息不存在或角色不支持" {
+				if errors.Is(err, errAnchorNotFound) {
 					return sendPlan{}, &ValidationError{Message: "assistantMessageId 与 userMessageId 不匹配"}
 				}
 				return sendPlan{}, err
@@ -324,13 +327,18 @@ func (ms *MessageService) planSend(ctx context.Context, req SendRequest) (sendPl
 	}
 }
 
-// anchorMessage 按 id 查一条消息；不存在返回 ValidationError。
+// errAnchorNotFound 锚点消息不在本会话里。调用方按它映射成不同文案
+// （user 锚点 → "userMessageId…"、assistant 锚点 → "assistantMessageId… 不匹配"），
+// 不依赖 message 字面量判断错误类型（04-审查报告 建议改 1）。
+var errAnchorNotFound = errors.New("锚点消息不存在")
+
+// anchorMessage 按 id 查一条消息；不存在返回 errAnchorNotFound。
 func (ms *MessageService) anchorMessage(ctx context.Context, conversationID, messageID string) (models.Message, error) {
 	var msg models.Message
 	const q = `SELECT ` + messageColumns + ` FROM x_messages WHERE conversation_id = ? AND id = ?`
 	if err := ms.db.GetContext(ctx, &msg, q, conversationID, messageID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return models.Message{}, &ValidationError{Message: "userMessageId 指向的消息不存在或角色不支持"}
+			return models.Message{}, errAnchorNotFound
 		}
 		return models.Message{}, fmt.Errorf("查询锚点消息 %s: %w", messageID, err)
 	}
