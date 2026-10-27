@@ -5,7 +5,12 @@ import type { ProviderModel } from '../../composables/useProviders'
 import ModelPicker from './ModelPicker.vue'
 
 // 切换模型按钮（02-ui设计.md ModelSwitchButton）：robot 图标 + 当前模型名，弹层从按钮向上弹出
-const props = defineProps<{ models: ProviderModel[]; modelValue: string; disabled?: boolean }>()
+const props = defineProps<{
+  models: ProviderModel[]
+  modelValue: string
+  provider?: string
+  disabled?: boolean
+}>()
 const emit = defineEmits<{ 'update:modelValue': [model: string] }>()
 
 const open = ref(false)
@@ -61,6 +66,7 @@ onBeforeUnmount(() => {
       v-if="open"
       :models="models"
       :model-value="modelValue"
+      :provider="provider"
       @update:model-value="emit('update:modelValue', $event)"
       @close="close"
     />

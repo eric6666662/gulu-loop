@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, inject, ref } from 'vue'
 import ChatHeader from './ChatHeader.vue'
 import MessageList from './MessageList.vue'
 import ProviderBanner from './ProviderBanner.vue'
 import Composer from './Composer.vue'
 import EditMessageDialog from '../dialog/EditMessageDialog.vue'
 import { useChat } from '../../composables/useChat'
+import { useModelSelection } from '../../composables/useModelSelection'
+import type { UseProviders } from '../../composables/useProviders'
 import type { Message } from '../../api/messages'
-import type { ProviderModel } from '../../composables/useProviders'
 import * as conversationApi from '../../api/conversations'
 import * as messageApi from '../../api/messages'
 import { downloadText } from '../../lib/download'
@@ -21,10 +22,6 @@ const props = defineProps<{
   ensureConversation?: () => Promise<string>
   /** 有没有可用服务商（没有时禁止发送） */
   canSend?: boolean
-  /** 可选模型（含所属服务商） */
-  models?: ProviderModel[]
-  /** 默认模型（服务商配置里的默认值） */
-  defaultModel?: string
 }>()
 const emit = defineEmits<{
   rename: []
@@ -37,22 +34,27 @@ const emit = defineEmits<{
 const conversationId = computed(() => props.conversationId)
 const isDraft = computed(() => props.conversationId === '')
 
-const { messages, model, setModel, status, error, errorKind, refresh, send, retry, edit, stop } = useChat(conversationId, {
+// 服务商数据从 App provide 下来（同一实例）：激活一变，模型回落 watch 自动触发，
+// 不需要事件广播（02-前端设计.md §3）
+const providers = inject('providers') as UseProviders
+const selection = useModelSelection(providers.activeProvider)
+
+const { messages, status, error, errorKind, refresh, send, retry, edit, stop } = useChat(conversationId, {
   ensureConversation: () => props.ensureConversation?.() ?? Promise.reject(new Error('缺少建会话能力')),
   onConversationReady: (id) => emit('conversation-ready', id),
   onDone: (id, count) => emit('done', id, count),
+  // 每次请求前读当前选中的 (serviceProvider, model)（ADR-0016）
+  getModel: () => selection.selected.value,
 })
 
-// 切会话 → 回落到默认模型；默认模型后到时（服务商列表异步加载）也补上
-watch(() => props.conversationId, () => setModel(props.defaultModel ?? ''), { immediate: true })
-watch(
-  () => props.defaultModel,
-  (def) => {
-    if (!model.value && def) setModel(def)
-  },
-)
-
 const composer = ref<InstanceType<typeof Composer> | null>(null)
+
+/** 选中某个模型：值带服务商身份（同名模型因此不再歧义） */
+function onPickModel(id: string): void {
+  const m = selection.models.value.find((x) => x.id === id)
+  if (!m) return
+  selection.select({ serviceProvider: m.serviceProvider, model: m.id })
+}
 
 async function onSend(text: string): Promise<void> {
   await send(text)
@@ -148,11 +150,12 @@ defineExpose({
       ref="composer"
       :streaming="status === 'streaming'"
       :disabled="canSend === false"
-      :models="models ?? []"
-      :model="model"
+      :models="selection.models.value"
+      :model="selection.label.value"
+      :provider="providers.activeProvider.value?.serviceProvider ?? ''"
       @send="onSend"
       @stop="stop"
-      @update:model="setModel"
+      @update:model="onPickModel"
     />
   </div>
 </template>

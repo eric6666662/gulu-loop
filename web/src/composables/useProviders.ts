@@ -40,15 +40,13 @@ export function useProviders(): UseProviders {
     () => providers.value.find((p) => p.isActive) ?? null,
   )
 
-  const models = computed<ProviderModel[]>(() =>
-    providers.value.flatMap((p) =>
-      p.models.map((m) => ({
-        id: m.id,
-        name: m.name || m.id,
-        serviceProvider: p.serviceProvider,
-      })),
-    ),
-  )
+  // 候选模型**只来自激活的服务商**（ADR-0015 / ADR-0016）：
+  // 不同服务商的同名模型因此不会同时出现在下拉里，不需要去重也不需要分组。
+  const models = computed<ProviderModel[]>(() => {
+    const p = activeProvider.value
+    if (!p) return []
+    return p.models.map((m) => ({ id: m.id, name: m.name || m.id, serviceProvider: p.serviceProvider }))
+  })
 
   async function load(): Promise<void> {
     loading.value = true

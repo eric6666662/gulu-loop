@@ -1,8 +1,54 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
+import { computed, ref } from 'vue'
 import ChatArea from './ChatArea.vue'
 import * as api from '../../api/messages'
 import * as conversationApi from '../../api/conversations'
+import type { Provider } from '../../api/providers'
+
+/**
+ * ChatArea 从 App provide 下来的服务商实例读激活项（02-前端设计.md §3），
+ * 所以每个用例都要给一份假 providers。
+ */
+function activeProviders(over: Partial<Provider> = {}) {
+  const p: Provider = {
+    serviceProvider: 'deepseek',
+    baseUrl: 'https://api.deepseek.com/v1',
+    model: 'deepseek-v4-pro',
+    models: [
+      { id: 'deepseek-v4-pro', name: 'V4 Pro' },
+      { id: 'kimi-k2', name: 'Kimi K2' },
+    ],
+    hasApiKey: true,
+    isActive: true,
+    createdAt: '2026-10-26T00:00:00Z',
+    updatedAt: '2026-10-26T00:00:00Z',
+    ...over,
+  }
+  const providers = ref<Provider[]>([p])
+  return {
+    providers,
+    activeProvider: computed(() => providers.value.find((x) => x.isActive) ?? null),
+    models: computed(() => []),
+    loading: ref(false),
+    error: ref(''),
+    load: vi.fn(),
+    activate: vi.fn(),
+    create: vi.fn(),
+    update: vi.fn(),
+    remove: vi.fn(),
+    test: vi.fn(),
+  }
+}
+
+function mountChatArea(props: Record<string, unknown>) {
+  const { __attachTo, ...rest } = props as { __attachTo?: boolean }
+  return mount(ChatArea, {
+    props: rest as never,
+    global: { provide: { providers: activeProviders() } },
+    ...(__attachTo ? { attachTo: document.body } : {}),
+  })
+}
 
 describe('ChatArea', () => {
   afterEach(() => vi.restoreAllMocks())
@@ -10,7 +56,7 @@ describe('ChatArea', () => {
   it('草稿态（无会话 id）：显示草稿对话页 + 输入区，不请求历史', async () => {
     const list = vi.spyOn(api, 'list')
 
-    const w = mount(ChatArea, { props: { conversationId: '', title: '' } })
+    const w = mountChatArea({ conversationId: '', title: '' })
     await flushPromises()
 
     expect(w.text()).toContain('开始新的对话')
@@ -21,7 +67,7 @@ describe('ChatArea', () => {
   it('有会话：拉历史并渲染，输入区可用', async () => {
     vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
 
-    const w = mount(ChatArea, { props: { conversationId: 'c1', title: '测试会话' } })
+    const w = mountChatArea({ conversationId: 'c1', title: '测试会话' })
     await flushPromises()
 
     expect(w.find('h1').text()).toBe('测试会话')
@@ -44,7 +90,7 @@ describe('ChatArea · 重试与编辑', () => {
       return { abort: () => {}, done: Promise.resolve() }
     })
 
-    const w = mount(ChatArea, { props: { conversationId: 'c1', title: 't' } })
+    const w = mountChatArea({ conversationId: 'c1', title: 't' })
     await flushPromises()
     await w.find('[data-retry]').trigger('click')
 
@@ -58,7 +104,7 @@ describe('ChatArea · 重试与编辑', () => {
       return { abort: () => {}, done: Promise.resolve() }
     })
 
-    const w = mount(ChatArea, { props: { conversationId: 'c1', title: 't' }, attachTo: document.body })
+    const w = mountChatArea({ ...{ conversationId: 'c1', title: 't' }, __attachTo: true })
     await flushPromises()
     await w.find('[data-edit]').trigger('click')
     await w.vm.$nextTick()
@@ -88,7 +134,7 @@ describe('ChatArea · 导出与复制', () => {
       .spyOn(conversationApi, 'exportMarkdown')
       .mockResolvedValue({ filename: '会话.md', content: '# 标题' })
 
-    const w = mount(ChatArea, { props: { conversationId: 'c1', title: 't' }, attachTo: document.body })
+    const w = mountChatArea({ ...{ conversationId: 'c1', title: 't' }, __attachTo: true })
     await flushPromises()
     await w.find('[data-export]').trigger('click')
     await flushPromises()
@@ -101,7 +147,7 @@ describe('ChatArea · 导出与复制', () => {
     vi.spyOn(api, 'list').mockResolvedValue({ list: thread, hasMore: false })
     const contentSpy = vi.spyOn(api, 'content').mockResolvedValue('第一答')
 
-    const w = mount(ChatArea, { props: { conversationId: 'c1', title: 't' }, attachTo: document.body })
+    const w = mountChatArea({ ...{ conversationId: 'c1', title: 't' }, __attachTo: true })
     await flushPromises()
     await w.findAll('[data-copy]')[1].trigger('click') // 第二条 = assistant
     await flushPromises()
@@ -117,7 +163,7 @@ describe('ChatArea · 无服务商', () => {
   it('没有可用服务商时显示横幅，且输入区禁用', async () => {
     vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
 
-    const w = mount(ChatArea, { props: { conversationId: 'c1', title: 't', canSend: false } })
+    const w = mountChatArea({ conversationId: 'c1', title: 't', canSend: false })
     await flushPromises()
 
     expect(w.text()).toContain('还没有可用的服务商')
@@ -127,7 +173,7 @@ describe('ChatArea · 无服务商', () => {
   it('有服务商时不显示横幅', async () => {
     vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
 
-    const w = mount(ChatArea, { props: { conversationId: 'c1', title: 't', canSend: true } })
+    const w = mountChatArea({ conversationId: 'c1', title: 't', canSend: true })
     await flushPromises()
 
     expect(w.text()).not.toContain('还没有可用的服务商')

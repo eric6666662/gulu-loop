@@ -340,26 +340,50 @@ describe('useChat · 乐观消息的服务端化', () => {
 describe('useChat · 模型切换', () => {
   afterEach(() => vi.restoreAllMocks())
 
-  it('setModel 后，send 带上该 model', async () => {
+  it('send 带上 getModel 给的 (serviceProvider, model)（ADR-0016）', async () => {
     vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
     const spy = fakeSend([{ type: 'done', messageCount: 1 }])
 
-    const { model, setModel, send } = useChat(ref('c1'))
-    setModel('kimi-k2')
-    expect(model.value).toBe('kimi-k2')
+    const { send } = useChat(ref('c1'), {
+      getModel: () => ({ serviceProvider: 'relay', model: 'kimi-k2' }),
+    })
 
     await send('你好')
 
-    expect(spy.mock.calls[0][1]).toMatchObject({ model: 'kimi-k2' })
+    expect(spy.mock.calls[0][1]).toMatchObject({ serviceProvider: 'relay', model: 'kimi-k2' })
   })
 
-  it('没设置 model 时请求体不带 model（用服务商默认）', async () => {
+  it('getModel 返回 null 时请求体不带这两个字段（用激活服务商的默认模型）', async () => {
     vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
     const spy = fakeSend([{ type: 'done', messageCount: 1 }])
 
-    const { send } = useChat(ref('c1'))
+    const { send } = useChat(ref('c1'), { getModel: () => null })
     await send('你好')
 
-    expect((spy.mock.calls[0][1] as { model?: string }).model).toBeUndefined()
+    const body = spy.mock.calls[0][1] as { model?: string; serviceProvider?: string }
+    expect(body.model).toBeUndefined()
+    expect(body.serviceProvider).toBeUndefined()
+  })
+
+  it('retry 与 edit 也带当前模型（重试不读原消息快照）', async () => {
+    vi.spyOn(api, 'list').mockResolvedValue({
+      list: [
+        { id: 'u1', conversationId: 'c1', seq: 1, role: 'user', content: 'q', model: '', serviceProvider: '', thinkingContent: '', thinkingDuration: 0, createdAt: '', updatedAt: '' },
+        { id: 'a1', conversationId: 'c1', seq: 2, role: 'assistant', content: 'a', model: 'old-model', serviceProvider: 'official', thinkingContent: '', thinkingDuration: 0, createdAt: '', updatedAt: '' },
+      ],
+      hasMore: false,
+    })
+    const spy = fakeSend([{ type: 'done', messageCount: 2 }])
+
+    const { retry, edit, refresh } = useChat(ref('c1'), {
+      getModel: () => ({ serviceProvider: 'relay', model: 'new-model' }),
+    })
+    await refresh()
+
+    await retry('a1')
+    expect(spy.mock.calls[0][1]).toMatchObject({ serviceProvider: 'relay', model: 'new-model' })
+
+    await edit('u1', '改过的')
+    expect(spy.mock.calls[1][1]).toMatchObject({ serviceProvider: 'relay', model: 'new-model' })
   })
 })

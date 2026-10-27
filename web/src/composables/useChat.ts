@@ -4,6 +4,12 @@ import type { Message, SendHandle } from '../api/messages'
 
 export type ChatStatus = 'idle' | 'loading' | 'streaming' | 'error'
 
+/** 当前选中的模型身份（ADR-0016）：由 useModelSelection 提供，useChat 不自己持有 */
+export interface ChatModelRef {
+  serviceProvider: string
+  model: string
+}
+
 export interface ChatDeps {
   /** 草稿态首次发送：先建会话（App 注入，内部走 POST /conversations） */
   ensureConversation?: () => Promise<string>
@@ -11,13 +17,15 @@ export interface ChatDeps {
   onConversationReady?: (id: string) => void
   /** 一轮结束：App 用来 touch 列表（消息数 / 时间） */
   onDone?: (conversationId: string, messageCount: number) => void
+  /**
+   * 每次请求前读当前选中的 (serviceProvider, model)。
+   * 返回 null 表示不带这两个字段（后端用激活服务商的默认模型）。
+   */
+  getModel?: () => ChatModelRef | null
 }
 
 export interface UseChat {
   messages: Ref<Message[]>
-  /** 会话内当前选中的模型（切换后后续消息都用它） */
-  model: Ref<string>
-  setModel: (model: string) => void
   status: Ref<ChatStatus>
   error: Ref<string>
   /** 错误来源：load=拉历史失败；stream=生成中失败（两者文案不同） */
@@ -42,7 +50,6 @@ const HISTORY_LIMIT = 50
  */
 export function useChat(conversationId: Ref<string>, deps: ChatDeps = {}): UseChat {
   const messages = ref<Message[]>([])
-  const model = ref('')
   const status = ref<ChatStatus>('idle')
   const error = ref('')
   const errorKind = ref<'load' | 'stream' | ''>('')
@@ -121,8 +128,10 @@ export function useChat(conversationId: Ref<string>, deps: ChatDeps = {}): UseCh
     }
 
     let assistantId = ''
-    // 会话内切换过的模型要跟着每一次请求走（没设置就不带，用服务商默认）
-    const payload = model.value ? { ...input, model: model.value } : input
+    // 每次请求都读当前选中的 (serviceProvider, model)：重试/编辑也用**当前**选择，
+    // 不读原消息快照（01-需求 Q5 决策）
+    const sel = deps.getModel?.() ?? null
+    const payload = sel ? { ...input, serviceProvider: sel.serviceProvider, model: sel.model } : input
     handle = api.send(convId, payload, (e) => {
       switch (e.type) {
         case 'start': {
@@ -236,14 +245,8 @@ export function useChat(conversationId: Ref<string>, deps: ChatDeps = {}): UseCh
   }
 
   /** 会话内切换模型：后续消息都用它（01-需求 #9） */
-  function setModel(next: string): void {
-    model.value = next
-  }
-
   return {
     messages,
-    model,
-    setModel,
     status,
     error,
     errorKind,

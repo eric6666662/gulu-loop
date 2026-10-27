@@ -24,16 +24,6 @@ provide('settingsPane', settingsPane)
 
 const sidebarOpen = ref(false)
 
-/**
- * 默认模型：按服务商创建时间取第一个服务商的默认模型。
- *
- * "使用中服务商"在 2026-10-23 被撤销（01-需求 #1f 已删），MVP 用这个口径
- * （02-ui设计.md 待确认点 12 的遗留约定），与后端 `firstProvider` 保持一致。
- */
-const defaultModel = computed(() => {
-  const sorted = [...providers.providers.value].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-  return sorted[0]?.model ?? ''
-})
 const currentTitle = computed(
   () => list.items.value.find((c) => c.id === selectedId.value)?.title ?? '',
 )
@@ -151,8 +141,6 @@ async function doRename(title: string): Promise<void> {
         :title="currentTitle"
         :ensure-conversation="ensureConversation"
         :can-send="providers.providers.value.length > 0"
-        :models="providers.models.value"
-        :default-model="defaultModel"
         @rename="renameOpen = true"
         @open-sidebar="sidebarOpen = true"
         @open-settings="settingsPane.openSettings"

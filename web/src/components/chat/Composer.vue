@@ -9,6 +9,8 @@ const props = defineProps<{
   disabled?: boolean
   /** 可选模型（含所属服务商）；为空时模型按钮禁用 */
   models?: ProviderModel[]
+  /** 激活的服务商名：模型弹层头部显示「<服务商> 的模型」 */
+  provider?: string
   /** 当前模型 */
   model?: string
 }>()
@@ -76,6 +78,7 @@ defineExpose({
         <ModelSwitchButton
           :models="props.models ?? []"
           :model-value="props.model ?? ''"
+          :provider="props.provider ?? ''"
           :disabled="props.disabled"
           @update:model-value="emit('update:model', $event)"
         />

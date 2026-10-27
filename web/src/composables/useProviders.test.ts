@@ -20,27 +20,50 @@ function provider(over: Partial<api.Provider>): api.Provider {
 describe('useProviders', () => {
   afterEach(() => vi.restoreAllMocks())
 
-  it('models 由 providers 派生：值取 id、标签取 name、带服务商标识', async () => {
+  it('models 只取激活服务商的清单：值取 id、标签取 name、带服务商标识', async () => {
     vi.spyOn(api, 'list').mockResolvedValue([
       provider({
         serviceProvider: 'deepseek',
-        models: [
-          { id: 'deepseek-v4-pro', name: 'V4 Pro' },
-          { id: 'deepseek-v4-flash', name: 'V4 Flash' },
-        ],
+        isActive: false,
+        models: [{ id: 'deepseek-v4-flash', name: 'V4 Flash' }],
       }),
       provider({
         serviceProvider: 'moonshot',
-        models: [{ id: 'kimi-k2', name: 'kimi-k2' }],
+        isActive: true,
+        models: [
+          { id: 'kimi-k2', name: 'K2' },
+          { id: 'kimi-k2-thinking', name: 'kimi-k2-thinking' },
+        ],
       }),
     ])
 
     const { models, load } = useProviders()
     await load()
 
-    expect(models.value.map((m) => m.id)).toEqual(['deepseek-v4-pro', 'deepseek-v4-flash', 'kimi-k2'])
-    expect(models.value[0]).toMatchObject({ id: 'deepseek-v4-pro', name: 'V4 Pro', serviceProvider: 'deepseek' })
-    expect(models.value[2].serviceProvider).toBe('moonshot')
+    expect(models.value.map((m) => m.id)).toEqual(['kimi-k2', 'kimi-k2-thinking'])
+    expect(models.value[0]).toMatchObject({ id: 'kimi-k2', name: 'K2', serviceProvider: 'moonshot' })
+  })
+
+  it('同名模型不会同时出现：只列激活服务商的那一份', async () => {
+    vi.spyOn(api, 'list').mockResolvedValue([
+      provider({ serviceProvider: 'official', isActive: false, models: [{ id: 'deepseek-chat', name: 'deepseek-chat' }] }),
+      provider({ serviceProvider: 'relay', isActive: true, models: [{ id: 'deepseek-chat', name: 'deepseek-chat' }] }),
+    ])
+
+    const { models, load } = useProviders()
+    await load()
+
+    expect(models.value).toHaveLength(1)
+    expect(models.value[0].serviceProvider).toBe('relay')
+  })
+
+  it('没有激活的服务商时 models 为空数组', async () => {
+    vi.spyOn(api, 'list').mockResolvedValue([provider({ serviceProvider: 'deepseek', isActive: false })])
+
+    const { models, load } = useProviders()
+    await load()
+
+    expect(models.value).toEqual([])
   })
 
   it('加载失败时 error 有值、providers 保持空', async () => {
@@ -56,7 +79,8 @@ describe('useProviders', () => {
   it('create 成功后 providers 与 models 都包含新服务商', async () => {
     vi.spyOn(api, 'list').mockResolvedValue([])
     vi.spyOn(api, 'create').mockResolvedValue(
-      provider({ serviceProvider: 'openai', models: [{ id: 'gpt-4o', name: 'GPT-4o' }] }),
+      // 首个服务商由后端自动激活（01-需求 #1f 验收 4）
+      provider({ serviceProvider: 'openai', isActive: true, models: [{ id: 'gpt-4o', name: 'GPT-4o' }] }),
     )
 
     const { providers, models, load, create } = useProviders()
@@ -73,15 +97,16 @@ describe('useProviders', () => {
 
     expect(created.serviceProvider).toBe('openai')
     expect(providers.value.map((p) => p.serviceProvider)).toEqual(['openai'])
+    // 首个服务商由后端自动激活，所以它的模型就是候选
     expect(models.value.map((m) => m.id)).toEqual(['gpt-4o'])
   })
 
-  it('update 成功后替换该条并重算 models', async () => {
+  it('update 成功后替换该条并重算 models（激活服务商的清单变了）', async () => {
     vi.spyOn(api, 'list').mockResolvedValue([
-      provider({ serviceProvider: 'deepseek', models: [{ id: 'deepseek-v4-pro', name: 'V4 Pro' }] }),
+      provider({ serviceProvider: 'deepseek', isActive: true, models: [{ id: 'deepseek-v4-pro', name: 'V4 Pro' }] }),
     ])
     vi.spyOn(api, 'update').mockResolvedValue(
-      provider({ serviceProvider: 'deepseek', models: [{ id: 'deepseek-v4-flash', name: 'V4 Flash' }] }),
+      provider({ serviceProvider: 'deepseek', isActive: true, models: [{ id: 'deepseek-v4-flash', name: 'V4 Flash' }] }),
     )
 
     const { providers, models, load, update } = useProviders()
@@ -131,20 +156,20 @@ describe('useProviders', () => {
     expect(api.test).toHaveBeenCalledWith('deepseek')
   })
 
-  it('remove 后该服务商的模型从 models 里消失', async () => {
+  it('remove 掉激活的服务商后 models 清空（落到无激活）', async () => {
     vi.spyOn(api, 'list').mockResolvedValue([
-      provider({ serviceProvider: 'deepseek' }),
+      provider({ serviceProvider: 'deepseek', isActive: true }),
       provider({ serviceProvider: 'moonshot', models: [{ id: 'kimi-k2', name: 'kimi-k2' }] }),
     ])
     vi.spyOn(api, 'remove').mockResolvedValue(undefined)
 
     const { models, load, remove } = useProviders()
     await load()
-    expect(models.value).toHaveLength(2)
+    expect(models.value.map((m) => m.serviceProvider)).toEqual(['deepseek'])
 
     await remove('deepseek')
 
-    expect(models.value.map((m) => m.serviceProvider)).toEqual(['moonshot'])
+    expect(models.value).toEqual([])
   })
 })
 
