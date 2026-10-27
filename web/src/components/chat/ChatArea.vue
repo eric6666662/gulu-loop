@@ -6,7 +6,7 @@ import ProviderBanner from './ProviderBanner.vue'
 import Composer from './Composer.vue'
 import EditMessageDialog from '../dialog/EditMessageDialog.vue'
 import { useChat } from '../../composables/useChat'
-import { useModelSelection } from '../../composables/useModelSelection'
+import type { UseModelSelection } from '../../composables/useModelSelection'
 import type { UseProviders } from '../../composables/useProviders'
 import type { Message } from '../../api/messages'
 import * as conversationApi from '../../api/conversations'
@@ -37,7 +37,8 @@ const isDraft = computed(() => props.conversationId === '')
 // 服务商数据从 App provide 下来（同一实例）：激活一变，模型回落 watch 自动触发，
 // 不需要事件广播（02-前端设计.md §3）
 const providers = inject('providers') as UseProviders
-const selection = useModelSelection(providers.activeProvider)
+// 选中模型是**跨视图**状态（App 持有）：切到设置页再回来不能丢（ADR-0016 修正）
+const selection = inject('modelSelection') as UseModelSelection
 
 const { messages, status, error, errorKind, refresh, send, retry, edit, stop } = useChat(conversationId, {
   ensureConversation: () => props.ensureConversation?.() ?? Promise.reject(new Error('缺少建会话能力')),
@@ -49,6 +50,14 @@ const { messages, status, error, errorKind, refresh, send, retry, edit, stop } =
 
 const composer = ref<InstanceType<typeof Composer> | null>(null)
 
+/** 回落痕迹的展示形态：{服务商, 新模型}；没有回落就是 null */
+const fallbackNotice = computed(() => {
+  const f = selection.fallback.value
+  const p = providers.activeProvider.value
+  if (!f || !p) return null
+  return { provider: p.serviceProvider, model: f.to }
+})
+
 /** 选中某个模型：值带服务商身份（同名模型因此不再歧义） */
 function onPickModel(id: string): void {
   const m = selection.models.value.find((x) => x.id === id)
@@ -57,6 +66,8 @@ function onPickModel(id: string): void {
 }
 
 async function onSend(text: string): Promise<void> {
+  // 回落痕迹只留到下一轮（02-前端设计.md §6：不落库、不堆积）
+  selection.clearFallback()
   await send(text)
 }
 
@@ -129,6 +140,7 @@ defineExpose({
         :status="status"
         :error="error"
         :error-kind="errorKind"
+      :fallback="fallbackNotice"
         :draft="isDraft"
         @retry="refresh"
         @message-retry="onRetry"

@@ -6,6 +6,7 @@ import MessageAssistant from './MessageAssistant.vue'
 import MessageUser from './MessageUser.vue'
 import SkeletonList from './SkeletonList.vue'
 import EmptyState from './EmptyState.vue'
+import ModelSwitchNotice from './ModelSwitchNotice.vue'
 import StreamError from './StreamError.vue'
 
 const props = defineProps<{
@@ -14,6 +15,8 @@ const props = defineProps<{
   error: string
   errorKind?: 'load' | 'stream' | ''
   draft?: boolean
+  /** 激活服务商变化导致的模型回落（02-ui设计.md §3 ModelSwitchNotice 回落变体） */
+  fallback?: { provider: string; model: string } | null
 }>()
 const emit = defineEmits<{
   /** 消息级重试（截断重发），与下面 StreamError 的 retry（重拉历史）区分开 */
@@ -32,20 +35,32 @@ const ordered = computed(() => [...props.messages].sort((a, b) => a.seq - b.seq)
 /**
  * 渲染行：消息 + 换模型痕迹。
  *
- * 痕迹是**派生**的，不额外存状态：相邻两条 assistant 的 model 不同，就在后一条前面
- * 插一条「已切换到 xxx」（02-ui设计.md ModelSwitchNotice：仅真实切换时出现）。
+ * 痕迹是**派生**的，不额外存状态：相邻两条 assistant 的 (serviceProvider, model) 不同，
+ * 就在后一条前面插一条（02-ui设计.md ModelSwitchNotice：仅真实切换时出现）。
+ * **必须比服务商**：换了服务商但模型名相同时（中转站与官方都有 deepseek-chat），
+ * 只比模型名会漏掉这次切换（ADR-0015）。
  */
-type Row = { kind: 'message'; message: Message } | { kind: 'notice'; model: string; key: string }
+type Row =
+  | { kind: 'message'; message: Message }
+  | { kind: 'notice'; model: string; provider: string; key: string }
 
 const rows = computed<Row[]>(() => {
   const out: Row[] = []
-  let prevModel = ''
+  let prev: { model: string; provider: string } | null = null
   for (const m of ordered.value) {
-    if (m.role === 'assistant') {
-      if (prevModel && m.model && m.model !== prevModel) {
-        out.push({ kind: 'notice', model: m.model, key: `notice-${m.id}` })
+    if (m.role === 'assistant' && m.model) {
+      const cur = { model: m.model, provider: m.serviceProvider ?? '' }
+      const changed = prev !== null && (prev.model !== cur.model || prev.provider !== cur.provider)
+      if (changed) {
+        out.push({
+          kind: 'notice',
+          model: cur.model,
+          // 只有服务商也变了才把服务商名带上（模型名不同时带上是噪音）
+          provider: prev!.provider !== cur.provider ? cur.provider : '',
+          key: `notice-${m.id}`,
+        })
       }
-      if (m.model) prevModel = m.model
+      prev = cur
     }
     out.push({ kind: 'message', message: m })
   }
@@ -79,11 +94,11 @@ const errorHint = computed(() =>
 
     <template v-else>
       <template v-for="row in rows" :key="row.kind === 'message' ? row.message.id : row.key">
-        <div v-if="row.kind === 'notice'" data-model-switch-notice class="my-8 flex items-center gap-3">
-          <span class="h-px flex-1 bg-border"></span>
-          <span class="text-caption text-ink-muted">已切换到 {{ row.model }}</span>
-          <span class="h-px flex-1 bg-border"></span>
-        </div>
+        <ModelSwitchNotice
+          v-if="row.kind === 'notice'"
+          :model="row.model"
+          :provider="row.provider"
+        />
         <MessageUser
           v-else-if="row.message.role === 'user'"
           :message="row.message"
@@ -98,6 +113,13 @@ const errorHint = computed(() =>
         />
       </template>
     </template>
+
+    <ModelSwitchNotice
+      v-if="fallback"
+      reason="fallback"
+      :provider="fallback.provider"
+      :model="fallback.model"
+    />
 
     <StreamError
       v-if="status === 'error'"

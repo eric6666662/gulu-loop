@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { computed, ref } from 'vue'
+import { useModelSelection } from '../../composables/useModelSelection'
 import ChatArea from './ChatArea.vue'
 import * as api from '../../api/messages'
 import * as conversationApi from '../../api/conversations'
@@ -43,10 +44,16 @@ function activeProviders(over: Partial<Provider> = {}) {
 
 function mountChatArea(props: Record<string, unknown>) {
   const { __attachTo, ...rest } = props as { __attachTo?: boolean }
+  return mountWith(activeProviders(), rest as never, __attachTo === true)
+}
+
+/** 同时提供 providers 与 modelSelection（后者是 App 层状态，见 ADR-0016 修正） */
+function mountWith(providers: ReturnType<typeof activeProviders>, props: never, attachTo = false) {
+  const modelSelection = useModelSelection(providers.activeProvider)
   return mount(ChatArea, {
-    props: rest as never,
-    global: { provide: { providers: activeProviders() } },
-    ...(__attachTo ? { attachTo: document.body } : {}),
+    props,
+    global: { provide: { providers, modelSelection } },
+    ...(attachTo ? { attachTo: document.body } : {}),
   })
 }
 
@@ -177,5 +184,45 @@ describe('ChatArea · 无服务商', () => {
     await flushPromises()
 
     expect(w.text()).not.toContain('还没有可用的服务商')
+  })
+})
+
+describe('ChatArea · 模型回落痕迹（任务 17）', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('激活换人且模型不在新清单 → 消息区出现回落痕迹；发送后消失', async () => {
+    vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
+    vi.spyOn(api, 'send').mockImplementation((_id, _input, onEvent) => {
+      onEvent({ type: 'done', messageCount: 2 } as never)
+      return { abort: () => {}, done: Promise.resolve() }
+    })
+
+    const providers = activeProviders()
+    const w = mountWith(providers, { conversationId: 'c1', title: 't', canSend: true } as never)
+    await flushPromises()
+
+    // 切到另一个服务商，且它的清单里没有当前模型 → 回落
+    providers.providers.value = [
+      {
+        serviceProvider: 'relay',
+        baseUrl: 'https://relay.example.com/v1',
+        model: 'gpt-4o',
+        models: [{ id: 'gpt-4o', name: 'GPT-4o' }],
+        hasApiKey: true,
+        isActive: true,
+        createdAt: '2026-10-26T00:00:00Z',
+        updatedAt: '2026-10-26T00:00:00Z',
+      },
+    ]
+    await flushPromises()
+
+    expect(w.text()).toContain('服务商换成 relay，模型跟着换成 gpt-4o')
+
+    // 发一条 → 痕迹只留到下一轮
+    await w.find('[data-composer-textarea]').setValue('你好')
+    await w.find('[data-composer-textarea]').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+
+    expect(w.text()).not.toContain('服务商换成 relay')
   })
 })

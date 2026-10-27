@@ -131,3 +131,56 @@ describe('MessageList · 换模型痕迹', () => {
     expect(w.findAll('[data-model-switch-notice]')).toHaveLength(0)
   })
 })
+
+describe('MessageList · 换模型痕迹与回落（v15）', () => {
+  const base = {
+    conversationId: 'c1',
+    thinkingContent: '',
+    thinkingDuration: 0,
+    createdAt: '2026-10-26T00:00:00Z',
+    updatedAt: '',
+  }
+
+  it('换服务商但模型名相同 → 也出痕迹（比 (serviceProvider, model)）', () => {
+    const w = mount(MessageList, {
+      props: {
+        messages: [
+          { ...base, id: 'a1', seq: 2, role: 'assistant', content: '一', model: 'deepseek-chat', serviceProvider: 'official' },
+          { ...base, id: 'a2', seq: 4, role: 'assistant', content: '二', model: 'deepseek-chat', serviceProvider: 'relay' },
+        ],
+        status: 'idle' as const,
+        error: '',
+      },
+    })
+
+    expect(w.text()).toContain('已切换到 relay · deepseek-chat')
+  })
+
+  it('服务商与模型都没变 → 不出痕迹', () => {
+    const w = mount(MessageList, {
+      props: {
+        messages: [
+          { ...base, id: 'a1', seq: 2, role: 'assistant', content: '一', model: 'm1', serviceProvider: 'official' },
+          { ...base, id: 'a2', seq: 4, role: 'assistant', content: '二', model: 'm1', serviceProvider: 'official' },
+        ],
+        status: 'idle' as const,
+        error: '',
+      },
+    })
+
+    expect(w.text()).not.toContain('已切换到')
+  })
+
+  it('fallback prop 存在时，列表末尾出现回落痕迹', () => {
+    const w = mount(MessageList, {
+      props: {
+        messages: [{ ...base, id: 'a1', seq: 2, role: 'assistant', content: '一', model: 'old', serviceProvider: 'official' }],
+        status: 'idle' as const,
+        error: '',
+        fallback: { provider: 'relay', model: 'gpt-4o' },
+      },
+    })
+
+    expect(w.text()).toContain('服务商换成 relay，模型跟着换成 gpt-4o')
+  })
+})

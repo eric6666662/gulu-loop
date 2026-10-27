@@ -9,6 +9,7 @@ import ToastHost from './components/ui/ToastHost.vue'
 import type { Conversation } from './api/conversations'
 import { useConversationList } from './composables/useConversationList'
 import { useProviders } from './composables/useProviders'
+import { useModelSelection } from './composables/useModelSelection'
 import { useSelectedFromQuery } from './composables/useSelectedFromQuery'
 import { useSettingsPane } from './composables/useSettingsPane'
 import { useToast } from './composables/useToast'
@@ -20,6 +21,11 @@ const { selectedId, select } = useSelectedFromQuery(list.items)
 const { push } = useToast()
 
 provide('providers', providers)
+// 模型选择提到 App 层：ChatArea 在切到设置页时会被 v-if 卸载，
+// 放组件内部会在"去设置页激活服务商 → 回聊天页"这条最常见的路径上丢状态，
+// 回落也就永远不会发生（ADR-0016 的修正）。
+const modelSelection = useModelSelection(providers.activeProvider)
+provide('modelSelection', modelSelection)
 provide('settingsPane', settingsPane)
 
 const sidebarOpen = ref(false)
