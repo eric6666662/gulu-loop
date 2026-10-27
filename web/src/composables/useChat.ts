@@ -11,10 +11,8 @@ export interface ChatModelRef {
 }
 
 export interface ChatDeps {
-  /** 草稿态首次发送：先建会话（App 注入，内部走 POST /conversations） */
-  ensureConversation?: () => Promise<string>
-  /** 会话刚建好：App 用来 select + 插到侧栏最前 */
-  onConversationReady?: (id: string) => void
+  /** meta 带回新会话（草稿态 send 后端建的）：App 用来 select + 插侧栏（带标题） */
+  onConversationReady?: (id: string, title: string) => void
   /** 一轮结束：App 用来 touch 列表（消息数 / 时间） */
   onDone?: (conversationId: string, messageCount: number) => void
   /**
@@ -32,9 +30,9 @@ export interface UseChat {
   errorKind: Ref<'load' | 'stream' | ''>
   refresh: () => Promise<void>
   send: (text: string) => Promise<void>
-  /** 重试：截断这条 assistant 及其后，用前面最近的 user 内容重发（ADR-0006） */
+  /** 重试：regenerate，锚点是这条 assistant 前面最近的 user 消息（ADR-0017） */
   retry: (messageId: string) => Promise<void>
-  /** 编辑后重发：截断这条 user 及其后，用新内容重发（ADR-0006） */
+  /** 编辑后重发：regenerate，锚点是这条 user 消息，用新内容（ADR-0017） */
   edit: (messageId: string, content: string) => Promise<void>
   stop: () => void
 }
@@ -106,68 +104,80 @@ export function useChat(conversationId: Ref<string>, deps: ChatDeps = {}): UseCh
     }
   }
 
-  /** 一次流式往返的公共骨架：send / retry / edit 都走这里 */
-  async function runStream(
-    convId: string,
-    input: api.SendInput,
-    optimisticUser?: string,
-  ): Promise<void> {
+  /**
+   * 一次流式往返的公共骨架：send / retry / edit 都走这里（ADR-0017）。
+   *
+   * `input.conversationId` 可为空（草稿态 send，后端建会话）；meta 事件带回新会话 id 与标题。
+   */
+  async function runStream(input: api.SendInput, optimisticUser?: string): Promise<void> {
     error.value = ''
     errorKind.value = ''
     status.value = 'streaming'
-    // 作废任何在途的"加载历史"请求：从这一刻起消息列表由本次发送接管，
-    // 否则历史晚回来会把乐观插入的消息整片覆盖掉（竞态）
+    // 作废任何在途的"加载历史"请求：从这一刻起消息列表由本次发送接管
     ticket++
 
+    let activeConvId = input.conversationId ?? ''
     if (optimisticUser !== undefined) {
-      // 乐观插入用户消息（前端先看见自己说的话）
       messages.value = [
         ...messages.value,
-        blankMessage({ id: `local-${Date.now()}`, conversationId: convId, role: 'user', content: optimisticUser }),
+        blankMessage({ id: `local-${Date.now()}`, conversationId: activeConvId, role: 'user', content: optimisticUser }),
       ]
     }
 
     let assistantId = ''
-    // 每次请求都读当前选中的 (serviceProvider, model)：重试/编辑也用**当前**选择，
-    // 不读原消息快照（01-需求 Q5 决策）
+    // 每次请求都读当前选中的 (serviceProvider, model)：重试/编辑也用**当前**选择
     const sel = deps.getModel?.() ?? null
     const payload = sel ? { ...input, serviceProvider: sel.serviceProvider, model: sel.model } : input
-    handle = api.send(convId, payload, (e) => {
+    handle = api.send(payload, (e) => {
       switch (e.type) {
-        case 'start': {
+        case 'meta': {
           assistantId = e.assistantMessageId
-          // 把乐观插入的 user 消息换成服务端 id / seq：
-          // 否则它带着 `local-*` 与 seq=0，排序会跑到最前、重试/编辑也会拿错 id
+          activeConvId = e.conversationId
+          // 把乐观插入的 user 消息换成服务端 id / seq（regenerate 时是**新** id）
           const local = [...messages.value].reverse().find((m) => m.id.startsWith('local-'))
           if (local && e.userMessageId) {
             messages.value = messages.value.map((m) =>
-              m.id === local.id ? { ...m, id: e.userMessageId as string, seq: e.seq - 1 } : m,
+              m.id === local.id
+                ? { ...m, id: e.userMessageId, conversationId: e.conversationId, seq: e.seq - 1 }
+                : m,
             )
           }
           messages.value = [
             ...messages.value,
             blankMessage({
               id: assistantId,
-              conversationId: convId,
+              conversationId: e.conversationId,
               seq: e.seq,
               role: 'assistant',
               model: e.model,
               serviceProvider: e.serviceProvider,
             }),
           ]
+          // 草稿态 send：meta 带回新会话 → 通知 App select + 插侧栏（带标题）
+          if (e.conversationId && e.conversationId !== conversationId.value) {
+            deps.onConversationReady?.(e.conversationId, e.title)
+          }
           break
         }
-        case 'delta':
-          messages.value = messages.value.map((m) =>
-            m.id === assistantId ? { ...m, content: m.content + e.content } : m,
-          )
+        case 'message': {
+          if (e.thinkingContent) {
+            messages.value = messages.value.map((m) =>
+              m.id === assistantId ? { ...m, thinkingContent: m.thinkingContent + e.thinkingContent } : m,
+            )
+          }
+          if (e.content) {
+            messages.value = messages.value.map((m) =>
+              m.id === assistantId ? { ...m, content: m.content + e.content } : m,
+            )
+          }
           break
+        }
         case 'done':
           status.value = 'idle'
-          deps.onDone?.(convId, e.messageCount ?? 0)
+          deps.onDone?.(activeConvId, e.messageCount ?? 0)
           break
         case 'error': {
-          // 已经收到的内容保留；一个字都没收到就把空占位摘掉（"这次回复没有写入会话"）
+          // 已经收到的内容保留；一个字都没收到就把空占位摘掉
           messages.value = messages.value.filter((m) => !(m.id === assistantId && m.content === ''))
           error.value = e.message
           errorKind.value = 'stream'
@@ -193,51 +203,60 @@ export function useChat(conversationId: Ref<string>, deps: ChatDeps = {}): UseCh
     const content = text.trim()
     if (!content || status.value === 'streaming') return
 
-    let convId = conversationId.value
-    if (!convId) {
-      // 草稿态：先建会话（01-需求 #5b），建好通知 App 选中并插入侧栏
-      if (!deps.ensureConversation) return
-      try {
-        convId = await deps.ensureConversation()
-      } catch (e) {
-        error.value = e instanceof Error ? e.message : String(e)
-        errorKind.value = 'stream'
-        status.value = 'error'
-        return
-      }
-      deps.onConversationReady?.(convId)
-    }
-
-    await runStream(convId, { content }, content)
+    // 草稿态（conversationId 空）：不带 conversationId，后端建会话（ADR-0017）
+    await runStream(
+      { type: 'send', content, conversationId: conversationId.value || undefined },
+      content,
+    )
   }
 
-  /** 重试：截断这条 assistant 及其后，用前面最近的 user 内容重发（ADR-0006） */
+  /** 重试：regenerate，锚点是这条 assistant 前面最近的 user 消息（送原文） */
   async function retry(messageId: string): Promise<void> {
     const convId = conversationId.value
     if (!convId || status.value === 'streaming') return
 
     const anchor = messages.value.find((m) => m.id === messageId)
-    if (!anchor) return
+    if (!anchor || anchor.role !== 'assistant') return
+    const userMsg = [...messages.value].filter((m) => m.role === 'user' && m.seq < anchor.seq).pop()
+    if (!userMsg) return
 
-    // 本地先截断（服务端也会截断），让 UI 立刻回到"待生成"状态
-    messages.value = messages.value.filter((m) => m.seq < anchor.seq)
-    await runStream(convId, { messageId })
+    // 本地先截断（服务端也会截断）：从 user 消息起删掉，再乐观插回它
+    messages.value = messages.value.filter((m) => m.seq < userMsg.seq)
+    await runStream(
+      {
+        type: 'regenerate',
+        conversationId: convId,
+        content: userMsg.content,
+        userMessageId: userMsg.id,
+        assistantMessageId: anchor.id,
+      },
+      userMsg.content,
+    )
   }
 
-  /** 编辑后重发：截断这条 user 及其后，用新内容重发（ADR-0006） */
+  /** 编辑后重发：regenerate，锚点是这条 user 消息，用新内容（ADR-0017） */
   async function edit(messageId: string, content: string): Promise<void> {
     const convId = conversationId.value
     const text = content.trim()
     if (!convId || !text || status.value === 'streaming') return
 
     const anchor = messages.value.find((m) => m.id === messageId)
-    if (!anchor) return
+    if (!anchor || anchor.role !== 'user') return
+    const asstMsg = [...messages.value].filter((m) => m.role === 'assistant' && m.seq > anchor.seq).shift()
 
     messages.value = messages.value.filter((m) => m.seq < anchor.seq)
-    await runStream(convId, { messageId, content: text }, text)
+    await runStream(
+      {
+        type: 'regenerate',
+        conversationId: convId,
+        content: text,
+        userMessageId: anchor.id,
+        assistantMessageId: asstMsg?.id,
+      },
+      text,
+    )
   }
 
-  /** 停止生成：中断流，已收到的内容保留 */
   function stop(): void {
     handle?.abort()
     handle = null

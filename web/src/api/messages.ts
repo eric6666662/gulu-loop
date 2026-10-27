@@ -38,13 +38,18 @@ export function list(
 }
 
 export interface SendInput {
-  /** 普通发送 / 编辑后重发时必填；重试（messageId 指向 assistant）时不需要 */
-  content?: string
+  /** send = 正常发送；regenerate = 重试/编辑后重发（两者在后端同一条路径） */
+  type: 'send' | 'regenerate'
+  /** send 可选（无则后端新建会话，草稿态）；regenerate 必填 */
+  conversationId?: string
+  content: string
   /** 服务商标识：必须等于当前激活的服务商（ADR-0015） */
   serviceProvider?: string
   model?: string
-  /** 截断锚点（ADR-0006）：assistant=重试，user=编辑后重发 */
-  messageId?: string
+  /** regenerate 的截断锚点（ADR-0017）：从它的 seq 起全删 */
+  userMessageId?: string
+  /** regenerate 的配对校验（可空）：编辑最后一条时它可能还没有 assistant 回复 */
+  assistantMessageId?: string
 }
 
 export interface SendHandle {
@@ -59,7 +64,6 @@ export interface SendHandle {
  * 开流前失败则 reject。调用方不需要自己读 ReadableStream。
  */
 export function send(
-  convId: string,
   input: SendInput,
   onEvent: (e: StreamEvent) => void,
 ): SendHandle {
@@ -68,7 +72,8 @@ export function send(
   const done = (async () => {
     let res: Response
     try {
-      res = await fetch(`/api/v1/conversations/${encodeURIComponent(convId)}/messages`, {
+      // conversationId 在 body 里（可选，无则后端新建会话；ADR-0017）
+      res = await fetch('/api/v1/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(input),

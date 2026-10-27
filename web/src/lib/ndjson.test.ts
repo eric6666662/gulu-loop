@@ -68,3 +68,42 @@ describe('lib/ndjson', () => {
     expect(got[0]).toMatchObject({ type: 'error', message: '调用超时' })
   })
 })
+
+describe('ndjson · 新契约事件（ADR-0017）', () => {
+  const res = (text: string) => new Response(text)
+
+  it('meta 事件带 title 与 conversationId', async () => {
+    const events: StreamEvent[] = []
+    await readNdjson(
+      res(`{"type":"meta","conversationId":"c1","title":"你好","userMessageId":"u1","assistantMessageId":"a1","seq":2,"model":"m","serviceProvider":"p"}\n`),
+      (e) => events.push(e),
+    )
+    const meta = events[0] as Extract<StreamEvent, { type: 'meta' }>
+    expect(meta.type).toBe('meta')
+    expect(meta.title).toBe('你好')
+    expect(meta.conversationId).toBe('c1')
+  })
+
+  it('message 事件带 content 与 thinkingContent', async () => {
+    const events: StreamEvent[] = []
+    await readNdjson(
+      res(`{"type":"message","thinkingContent":"想"}\n{"type":"message","content":"答"}\n`),
+      (e) => events.push(e),
+    )
+    expect(events[0]).toMatchObject({ type: 'message', thinkingContent: '想' })
+    expect(events[1]).toMatchObject({ type: 'message', content: '答' })
+  })
+
+  it('done 事件带 updatedAt、error 事件带 conversationId', async () => {
+    const events: StreamEvent[] = []
+    await readNdjson(
+      res(`{"type":"done","assistantMessageId":"a1","seq":2,"messageCount":3,"updatedAt":"2026-10-27T00:00:00Z"}\n`),
+      (e) => events.push(e),
+    )
+    expect(events[0]).toMatchObject({ type: 'done', updatedAt: '2026-10-27T00:00:00Z' })
+
+    const errs: StreamEvent[] = []
+    await readNdjson(res(`{"type":"error","conversationId":"c1","message":"超时"}\n`), (e) => errs.push(e))
+    expect(errs[0]).toMatchObject({ type: 'error', conversationId: 'c1', message: '超时' })
+  })
+})

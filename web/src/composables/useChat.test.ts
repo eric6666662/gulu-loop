@@ -93,12 +93,12 @@ describe('useChat', () => {
 // ---------- 发送（任务 6） ----------
 import * as msgApi from '../api/messages'
 
-function deltaChunk(content: string) {
-  return { type: 'delta' as const, content }
+function messageChunk(content: string) {
+  return { type: 'message' as const, content }
 }
 
 function fakeSend(events: Array<Record<string, unknown>>, opts: { failBefore?: Error } = {}) {
-  return vi.spyOn(msgApi, 'send').mockImplementation((_id, _input, onEvent) => {
+  return vi.spyOn(msgApi, 'send').mockImplementation((_input, onEvent) => {
     if (opts.failBefore) {
       return { abort: () => {}, done: Promise.reject(opts.failBefore) }
     }
@@ -115,9 +115,9 @@ describe('useChat.send', () => {
   it('乐观插入用户消息 → streaming 占位 → delta 追加 → done 收尾', async () => {
     vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
     fakeSend([
-      { type: 'start', assistantMessageId: 'a1', seq: 2, model: 'deepseek-v4-pro', serviceProvider: 'deepseek' },
-      deltaChunk('泛型版'),
-      deltaChunk('参数化。'),
+      { type: 'meta', conversationId: 'c1', title: 't', userMessageId: 'u-new', assistantMessageId: 'a1', seq: 2, model: 'deepseek-v4-pro', serviceProvider: 'deepseek' },
+      messageChunk('泛型版'),
+      messageChunk('参数化。'),
       { type: 'done', messageCount: 2 },
     ])
     const onDone = vi.fn()
@@ -137,8 +137,8 @@ describe('useChat.send', () => {
   it('error 事件 → status=error，保留已收内容', async () => {
     vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
     fakeSend([
-      { type: 'start', assistantMessageId: 'a1', seq: 2, model: 'm', serviceProvider: 'p' },
-      deltaChunk('收到一半'),
+      { type: 'meta', conversationId: 'c1', title: 't', userMessageId: 'u-new', assistantMessageId: 'a1', seq: 2, model: 'm', serviceProvider: 'p' },
+      messageChunk('收到一半'),
       { type: 'error', message: '调用超时' },
     ])
 
@@ -162,17 +162,20 @@ describe('useChat.send', () => {
     expect(messages.value.filter((m) => m.role === 'assistant')).toHaveLength(0)
   })
 
-  it('草稿态（无会话）：先建会话，通知 App 选中，再用新 id 发送', async () => {
-    const ensureConversation = vi.fn(async () => 'new-c1')
+  it('草稿态（无会话）：不带 conversationId，meta 带回新会话 → 通知 App（ADR-0017）', async () => {
     const onConversationReady = vi.fn()
-    const sendSpy = fakeSend([{ type: 'done', messageCount: 1 }])
+    const sendSpy = fakeSend([
+      { type: 'meta', conversationId: 'new-c1', title: '第一句', userMessageId: 'u1', assistantMessageId: 'a1', seq: 2, model: 'm', serviceProvider: 'p' },
+      { type: 'done', messageCount: 1 },
+    ])
 
-    const { send } = useChat(ref(''), { ensureConversation, onConversationReady })
+    const { send } = useChat(ref(''), { onConversationReady })
     await send('第一句')
 
-    expect(ensureConversation).toHaveBeenCalledTimes(1)
-    expect(onConversationReady).toHaveBeenCalledWith('new-c1')
-    expect(sendSpy.mock.calls[0][0]).toBe('new-c1')
+    // 不带 conversationId（后端建会话）
+    expect(sendSpy.mock.calls[0][0]).toMatchObject({ type: 'send', content: '第一句' })
+    expect(sendSpy.mock.calls[0][0].conversationId).toBeUndefined()
+    expect(onConversationReady).toHaveBeenCalledWith('new-c1', '第一句')
   })
 
   it('空内容不发送', async () => {
@@ -185,9 +188,9 @@ describe('useChat.send', () => {
   it('stop() 中断并保留已收内容', async () => {
     vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
     let abortFn: (() => void) | null = null
-    vi.spyOn(msgApi, 'send').mockImplementation((_id, _input, onEvent) => {
-      onEvent({ type: 'start', assistantMessageId: 'a1', seq: 2, model: 'm', serviceProvider: 'p' } as never)
-      onEvent({ type: 'delta', content: '一半' } as never)
+    vi.spyOn(msgApi, 'send').mockImplementation((_input, onEvent) => {
+      onEvent({ type: 'meta', conversationId: 'c1', title: 't', userMessageId: 'u-new', assistantMessageId: 'a1', seq: 2, model: 'm', serviceProvider: 'p' } as never)
+      onEvent({ type: 'message', content: '一半' } as never)
       return { abort: () => { abortFn = () => {} }, done: new Promise<void>(() => {}) }
     })
 
@@ -212,7 +215,7 @@ describe('useChat 竞态', () => {
       () => new Promise((r) => { resolveList = r as never }),
     )
     fakeSend([
-      { type: 'start', assistantMessageId: 'a1', seq: 2, model: 'm', serviceProvider: 'p' },
+      { type: 'meta', conversationId: 'c1', title: 't', userMessageId: 'u-new', assistantMessageId: 'a1', seq: 2, model: 'm', serviceProvider: 'p' },
       { type: 'done', messageCount: 2 },
     ])
 
@@ -233,7 +236,7 @@ describe('useChat · 错误来源区分', () => {
   it('生成中失败：errorKind=stream，且空占位被摘掉', async () => {
     vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
     fakeSend([
-      { type: 'start', assistantMessageId: 'a1', seq: 2, model: 'm', serviceProvider: 'p' },
+      { type: 'meta', conversationId: 'c1', title: 't', userMessageId: 'u-new', assistantMessageId: 'a1', seq: 2, model: 'm', serviceProvider: 'p' },
       { type: 'error', message: '上游返回 401：api_key 无效' },
     ])
 
@@ -277,14 +280,16 @@ describe('useChat.retry / edit', () => {
     await vi.waitFor(() => expect(messages.value).toHaveLength(4))
 
     const spy = fakeSend([
-      { type: 'start', assistantMessageId: 'm4-new', seq: 4, model: 'm', serviceProvider: 'p' },
-      deltaChunk('重答'),
+      { type: 'meta', conversationId: 'c1', title: 't', userMessageId: 'u-new', assistantMessageId: 'm4-new', seq: 4, model: 'm', serviceProvider: 'p' },
+      messageChunk('重答'),
       { type: 'done', messageCount: 4 },
     ])
     await retry('m4')
 
-    expect(spy.mock.calls[0][1]).toMatchObject({ messageId: 'm4' })
-    expect(messages.value.map((m) => m.id)).toEqual(['m1', 'm2', 'm3', 'm4-new'])
+    // regenerate：锚点是 m3（m4 前面最近的 user），送原文"第二问"
+    expect(spy.mock.calls[0][0]).toMatchObject({ type: 'regenerate', userMessageId: 'm3', assistantMessageId: 'm4', content: '第二问' })
+    // regenerate 后 user 消息 id 变成 meta 带回的新 id（原 m3 已删、重新追加）
+    expect(messages.value.map((m) => m.id)).toEqual(['m1', 'm2', 'u-new', 'm4-new'])
     expect(messages.value[3].content).toBe('重答')
   })
 
@@ -293,12 +298,12 @@ describe('useChat.retry / edit', () => {
     await vi.waitFor(() => expect(messages.value).toHaveLength(4))
 
     const spy = fakeSend([
-      { type: 'start', assistantMessageId: 'a-new', seq: 4, model: 'm', serviceProvider: 'p' },
+      { type: 'meta', conversationId: 'c1', title: 't', userMessageId: 'u-new', assistantMessageId: 'a-new', seq: 4, model: 'm', serviceProvider: 'p' },
       { type: 'done', messageCount: 4 },
     ])
     await edit('m3', '改过的第二问')
 
-    expect(spy.mock.calls[0][1]).toMatchObject({ messageId: 'm3', content: '改过的第二问' })
+    expect(spy.mock.calls[0][0]).toMatchObject({ type: 'regenerate', userMessageId: 'm3', assistantMessageId: 'm4', content: '改过的第二问' })
     const contents = messages.value.map((m) => m.content)
     expect(contents).toContain('改过的第二问')
     expect(contents).not.toContain('第二问')
@@ -321,7 +326,7 @@ describe('useChat · 乐观消息的服务端化', () => {
   it('start 事件到达后，乐观 user 消息换成服务端 id 与 seq（排序与重试才不会错）', async () => {
     vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
     fakeSend([
-      { type: 'start', userMessageId: 'u-real', assistantMessageId: 'a1', seq: 2, model: 'm', serviceProvider: 'p' },
+      { type: 'meta', conversationId: 'c1', title: 't', userMessageId: 'u-real', assistantMessageId: 'a1', seq: 2, model: 'm', serviceProvider: 'p' },
       { type: 'done', messageCount: 2 },
     ])
 
@@ -350,7 +355,7 @@ describe('useChat · 模型切换', () => {
 
     await send('你好')
 
-    expect(spy.mock.calls[0][1]).toMatchObject({ serviceProvider: 'relay', model: 'kimi-k2' })
+    expect(spy.mock.calls[0][0]).toMatchObject({ serviceProvider: 'relay', model: 'kimi-k2' })
   })
 
   it('getModel 返回 null 时请求体不带这两个字段（用激活服务商的默认模型）', async () => {
@@ -373,7 +378,11 @@ describe('useChat · 模型切换', () => {
       ],
       hasMore: false,
     })
-    const spy = fakeSend([{ type: 'done', messageCount: 2 }])
+    // meta 带回新 user id（regenerate 后 u1 被替换）
+    const spy = fakeSend([
+      { type: 'meta', conversationId: 'c1', title: 't', userMessageId: 'u-new', assistantMessageId: 'a-new', seq: 2, model: 'm', serviceProvider: 'p' },
+      { type: 'done', messageCount: 2 },
+    ])
 
     const { retry, edit, refresh } = useChat(ref('c1'), {
       getModel: () => ({ serviceProvider: 'relay', model: 'new-model' }),
@@ -381,9 +390,10 @@ describe('useChat · 模型切换', () => {
     await refresh()
 
     await retry('a1')
-    expect(spy.mock.calls[0][1]).toMatchObject({ serviceProvider: 'relay', model: 'new-model' })
+    expect(spy.mock.calls[0][0]).toMatchObject({ serviceProvider: 'relay', model: 'new-model', type: 'regenerate' })
 
-    await edit('u1', '改过的')
-    expect(spy.mock.calls[1][1]).toMatchObject({ serviceProvider: 'relay', model: 'new-model' })
+    // retry 后 u1 已被替换为 u-new，编辑它
+    await edit('u-new', '改过的')
+    expect(spy.mock.calls[1][0]).toMatchObject({ serviceProvider: 'relay', model: 'new-model', type: 'regenerate' })
   })
 })

@@ -127,3 +127,24 @@ describe('useConversationList', () => {
     expect(error.value).toBe('boom')
   })
 })
+
+describe('insert（后端建会话后本地插侧栏，ADR-0017）', () => {
+  it('插入到最前，不重复、不请求接口', async () => {
+    vi.spyOn(api, 'list').mockResolvedValue({
+      list: [conv(1, { id: 'c1', title: '老会话' })],
+      page: 1, pageSize: 10, total: 1,
+    })
+    const { items, insert, loadFirstPage } = useConversationList()
+    await loadFirstPage()
+
+    const listSpy = vi.spyOn(api, 'list')
+    insert(conv(2, { id: 'c-new', title: '新会话' }))
+
+    expect(items.value[0].id).toBe('c-new')
+    expect(items.value).toHaveLength(2)
+    // 重复插入不生效
+    insert(conv(2, { id: 'c-new', title: '新会话' }))
+    expect(items.value).toHaveLength(2)
+    expect(listSpy).not.toHaveBeenCalled() // 本地插入，不重拉
+  })
+})

@@ -14,6 +14,8 @@ export interface UseConversationList {
   loadFirstPage: () => Promise<void>
   loadMore: () => Promise<void>
   create: () => Promise<Conversation>
+  /** 本地插入一条会话（后端建的，前端没调 POST /conversations；ADR-0017 草稿态） */
+  insert: (conv: Conversation) => void
   rename: (id: string, title: string) => Promise<void>
   remove: (id: string) => Promise<void>
   touch: (id: string, patch: { messageCount?: number; lastMessageTime?: string }) => void
@@ -63,6 +65,13 @@ export function useConversationList(): UseConversationList {
     return created
   }
 
+  /** 本地插入：meta 带回新建会话时用（不请求接口）；已在列表则跳过 */
+  function insert(conv: Conversation): void {
+    if (items.value.some((c) => c.id === conv.id)) return
+    items.value = [conv, ...items.value]
+    total.value++
+  }
+
   async function rename(id: string, title: string): Promise<void> {
     const updated = await api.rename(id, title)
     items.value = items.value.map((c) => (c.id === id ? updated : c))
@@ -79,5 +88,5 @@ export function useConversationList(): UseConversationList {
     items.value = items.value.map((c) => (c.id === id ? { ...c, ...patch } : c))
   }
 
-  return { items, total, hasMore, loading, error, loadFirstPage, loadMore, create, rename, remove, touch }
+  return { items, total, hasMore, loading, error, loadFirstPage, loadMore, create, insert, rename, remove, touch }
 }

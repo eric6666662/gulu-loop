@@ -58,25 +58,22 @@ function onNewChat(): void {
   chatArea.value?.focusComposer()
 }
 
-/** 草稿态首次发送：真正建会话（此时才请求后端） */
-async function ensureConversation(): Promise<string> {
-  const created = await list.create()
-  return created.id
-}
-
-/** 会话刚建好：选中它（列表项已由 list.create 插入） */
-function onConversationReady(id: string): void {
+/** meta 带回新建会话（草稿态 send 时后端建的）：本地插侧栏 + 选中（标题已在 meta 里） */
+function onConversationReady(id: string, title: string): void {
+  list.insert({
+    id,
+    title,
+    messageCount: 0,
+    lastMessageTime: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  })
   select(id)
 }
 
-/** 一轮结束：先改本地列表的消息数与时间；标题还是空的（新会话）就重拉一次列表 */
+/** 一轮结束：改本地列表的消息数与时间（标题已由 meta 带回，不再重拉） */
 function onChatDone(id: string, messageCount: number): void {
-  const item = list.items.value.find((c) => c.id === id)
   list.touch(id, { messageCount, lastMessageTime: new Date().toISOString() })
-
-  // 后端在首条 user 消息写入时自动生成标题（01-需求 #10），前端拿不到新标题 →
-  // 只有"标题仍为空"这一种情况才重拉列表（顺带把新会话按时间排到最前）
-  if (item && item.title.trim() === '') void list.loadFirstPage()
 }
 
 // ---- 删除会话（确认弹层）----
@@ -145,7 +142,6 @@ async function doRename(title: string): Promise<void> {
         ref="chatArea"
         :conversation-id="selectedId"
         :title="currentTitle"
-        :ensure-conversation="ensureConversation"
         @rename="renameOpen = true"
         @open-sidebar="sidebarOpen = true"
         @open-settings="settingsPane.openSettings"

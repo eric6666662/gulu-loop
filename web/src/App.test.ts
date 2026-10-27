@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import App from './App.vue'
 import * as conversationApi from './api/conversations'
 import * as providerApi from './api/providers'
@@ -43,32 +43,18 @@ describe('App · 草稿态（01-需求 #5b）', () => {
 describe('App · 首条消息后拉取自动标题（01-需求 #10）', () => {
   afterEach(() => vi.restoreAllMocks())
 
-  it('会话标题为空时，一轮结束后重新拉列表（拿到后端生成的标题）', async () => {
-    const draft = {
-      id: 'c1',
-      title: '',
-      messageCount: 0,
-      lastMessageTime: null,
-      createdAt: '2026-10-26T10:00:00Z',
-      updatedAt: '',
-    }
-    const listSpy = vi
-      .spyOn(conversationApi, 'list')
-      .mockResolvedValueOnce({ list: [draft], page: 1, pageSize: 10, total: 1 })
-      .mockResolvedValue({
-        list: [{ ...draft, title: '帮我把快排改成泛型', messageCount: 2 }],
-        page: 1,
-        pageSize: 10,
-        total: 1,
-      })
+  it('meta 带回新会话（conversation-ready）→ 本地插侧栏并选中，标题来自 meta（ADR-0017）', async () => {
+    vi.spyOn(conversationApi, 'list').mockResolvedValue({ list: [], page: 1, pageSize: 10, total: 0 })
     vi.spyOn(providerApi, 'list').mockResolvedValue([])
     vi.spyOn(messageApi, 'list').mockResolvedValue({ list: [], hasMore: false })
 
     const w = mount(App)
-    await vi.waitFor(() => expect(listSpy).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(conversationApi.list).toHaveBeenCalled())
 
-    // 模拟"一轮对话结束"：直接触发 ChatArea 的 done 事件
-    await w.findComponent({ name: 'ChatArea' }).vm.$emit('done', 'c1', 2)
-    await vi.waitFor(() => expect(listSpy).toHaveBeenCalledTimes(2))
+    await w.findComponent({ name: 'ChatArea' }).vm.$emit('conversation-ready', 'c-new', '帮我把快排改成泛型')
+    await flushPromises()
+
+    const item = w.find('[data-conv]')
+    expect(item.text()).toContain('帮我把快排改成泛型')
   })
 })

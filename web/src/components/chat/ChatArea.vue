@@ -19,14 +19,13 @@ import { useToast } from '../../composables/useToast'
 const props = defineProps<{
   conversationId: string
   title: string
-  /** 草稿态首次发送时由 App 注入：先建会话再发 */
-  ensureConversation?: () => Promise<string>
 }>()
 const emit = defineEmits<{
   rename: []
   'open-sidebar': []
   'open-settings': []
-  'conversation-ready': [id: string]
+  /** meta 带回新会话（草稿态 send 后端建的）：带 id + 标题 */
+  'conversation-ready': [id: string, title: string]
   done: [conversationId: string, messageCount: number]
 }>()
 
@@ -48,8 +47,7 @@ const providers = inject('providers') as UseProviders
 const selection = inject('modelSelection') as UseModelSelection
 
 const { messages, status, error, errorKind, refresh, send, retry, edit, stop } = useChat(conversationId, {
-  ensureConversation: () => props.ensureConversation?.() ?? Promise.reject(new Error('缺少建会话能力')),
-  onConversationReady: (id) => emit('conversation-ready', id),
+  onConversationReady: (id, title) => emit('conversation-ready', id, title),
   onDone: (id, count) => emit('done', id, count),
   // 每次请求前读当前选中的 (serviceProvider, model)（ADR-0016）
   getModel: () => selection.selected.value,

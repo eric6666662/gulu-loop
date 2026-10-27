@@ -7,17 +7,24 @@
 
 export type StreamEvent =
   | {
-      type: 'start'
-      conversationId?: string
-      userMessageId?: string
+      type: 'meta'
+      conversationId: string
+      title: string
+      userMessageId: string
       assistantMessageId: string
       seq: number
       model: string
       serviceProvider: string
     }
-  | { type: 'delta'; content: string }
-  | { type: 'done'; assistantMessageId?: string; seq?: number; messageCount?: number }
-  | { type: 'error'; message: string }
+  | { type: 'message'; content?: string; thinkingContent?: string }
+  | {
+      type: 'done'
+      assistantMessageId?: string
+      seq?: number
+      messageCount?: number
+      updatedAt?: string
+    }
+  | { type: 'error'; conversationId?: string; message: string }
 
 const TERMINAL = new Set(['done', 'error'])
 

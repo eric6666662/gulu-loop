@@ -92,7 +92,7 @@ describe('ChatArea · 重试与编辑', () => {
 
   it('点助手消息的「重试」→ 用 messageId 重发', async () => {
     vi.spyOn(api, 'list').mockResolvedValue({ list: thread, hasMore: false })
-    const sendSpy = vi.spyOn(api, 'send').mockImplementation((_id, _input, onEvent) => {
+    const sendSpy = vi.spyOn(api, 'send').mockImplementation((_input, onEvent) => {
       onEvent({ type: 'done', messageCount: 2 } as never)
       return { abort: () => {}, done: Promise.resolve() }
     })
@@ -101,12 +101,13 @@ describe('ChatArea · 重试与编辑', () => {
     await flushPromises()
     await w.find('[data-retry]').trigger('click')
 
-    expect(sendSpy.mock.calls[0][1]).toMatchObject({ messageId: 'm2' })
+    // regenerate：锚点是 m2 前面最近的 user（m1），送原文"第一问"
+    expect(sendSpy.mock.calls[0][0]).toMatchObject({ type: 'regenerate', userMessageId: 'm1', assistantMessageId: 'm2', content: '第一问' })
   })
 
   it('点用户消息的「编辑」→ 弹层预填 → 保存后用新内容重发', async () => {
     vi.spyOn(api, 'list').mockResolvedValue({ list: thread, hasMore: false })
-    const sendSpy = vi.spyOn(api, 'send').mockImplementation((_id, _input, onEvent) => {
+    const sendSpy = vi.spyOn(api, 'send').mockImplementation((_input, onEvent) => {
       onEvent({ type: 'done', messageCount: 2 } as never)
       return { abort: () => {}, done: Promise.resolve() }
     })
@@ -122,7 +123,7 @@ describe('ChatArea · 重试与编辑', () => {
     await dialog.find('[data-content-input]').setValue('改过的问题')
     await dialog.find('[data-save]').trigger('click')
 
-    expect(sendSpy.mock.calls[0][1]).toMatchObject({ messageId: 'm1', content: '改过的问题' })
+    expect(sendSpy.mock.calls[0][0]).toMatchObject({ type: 'regenerate', userMessageId: 'm1', assistantMessageId: 'm2', content: '改过的问题' })
     w.unmount()
   })
 })
@@ -197,7 +198,7 @@ describe('ChatArea · 模型回落痕迹（任务 17）', () => {
 
   it('激活换人且模型不在新清单 → 消息区出现回落痕迹；发送后消失', async () => {
     vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
-    vi.spyOn(api, 'send').mockImplementation((_id, _input, onEvent) => {
+    vi.spyOn(api, 'send').mockImplementation((_input, onEvent) => {
       onEvent({ type: 'done', messageCount: 2 } as never)
       return { abort: () => {}, done: Promise.resolve() }
     })
