@@ -6,7 +6,7 @@
 
 ## 项目概况
 
-> 本节由 `/flow-init` 生成 / 刷新；代码演进后重跑 `/flow-init` 即可更新。**最后刷新：2026-10-26**。
+> 本节由 `/flow-init` 生成 / 刷新；代码演进后重跑 `/flow-init` 即可更新。**最后刷新：2026-10-27**。
 
 ## 项目定位
 
@@ -75,23 +75,26 @@ internal/
     models/core.go          # Conversation / Message / ConversationSummary / ServiceProvider
     models/provider.go      # ProviderSetting：setting_json 的编解码（兼容旧格式）
   service/                  # 业务编排（直连 sqlx，无 repo 层，ADR-0010）
-    conversation.go         # 会话列表 / 取单条 / 重命名 / 级联删除
-    message.go              # 消息分页 / 删除（含计数与摘要锚点维护）
-    provider.go             # 服务商 CRUD + 校验 + 脱敏视图
+    conversation.go         # 会话列表 / 取单条 / 重命名 / 级联删除 / 导出 Markdown
+    message.go              # 发送（流式/截断/上下文拼接/摘要触发）/ 分页 / 删除 / 单条内容
+    provider.go             # 服务商 CRUD + 校验 + 脱敏视图 + Activate（ADR-0015）
   httpapi/
     server.go               # chi 路由 + 中间件 + 静态资源（SPA 回退）+ 生命周期
     handlers.go             # 各业务 handler（按业务域分段）
     respond.go              # 统一响应信封与错误响应
   logger/core.go            # slog 初始化
-  llm/                      # LLM 客户端（openai-go 全封装）：Stream/FetchModels/Summarize（ADR-0014）
+  llm/client.go             # LLM 客户端（openai-go 全封装）：Stream/FetchModels/Summarize（ADR-0014）
   memory/ session/          # 空目录：预留给第二阶段
 migrations/
   000001_init.sql           # 建表：服务商 / 会话 / 摘要 / 消息
+  000002_active_provider.sql # is_active 列 + 部分唯一索引 + 存量回填（ADR-0015）
   embed.go                  # goose embed FS
 web/                        # Vue 3 + Vite 前端工程
-  src/api/                  # client（拆信封）+ providers
-  src/components/           # layout / chat / settings / dialog / ui
-  src/composables/          # useProviders / useSettingsPane / useToast
+  src/api/                  # client（拆信封）+ conversations / messages / providers
+  src/components/           # layout / chat / settings / dialog / ui（约 30 个 .vue）
+  src/composables/          # useChat / useModelSelection / useProviders / useConversationList
+                            # / useSelectedFromQuery / useSettingsPane / useToast
+  src/lib/                  # ndjson（流解析）/ markdown / highlighter / format / download
   src/styles/               # tokens.css（从 docs 同步）+ main.css
   dist/                     # 构建产物，已入库（go:embed 输入）
 docs/
@@ -120,7 +123,7 @@ README.md                   # 空（待补）
 | 流式协议（NDJSON） | ✅ | **meta/message/done/error**（ADR-0017）；开流前 4xx、开流后一律 error 事件；`POST /api/v1/messages` |
 | 上下文拼接 / 自动摘要 | ✅ | ≤10 条全发；>10 条带摘要；摘要异步生成 + upsert（锚点=最新 assistant） |
 | 拉取模型列表 / 检测连通 | ✅ | 接口 #14 / #15 已实现（前端弹层 + ⋯ 菜单） |
-| 前端聊天界面 | ✅ | 侧栏、会话头、`?c=` 深链、消息区（Markdown + 高亮 + 四种态）、输入区与流式发送（停止生成 / 草稿态）、会话内模型切换、**无服务商横幅 / 键盘可达 / 文案纪律** 已完成 |
+| 前端聊天界面 | ✅ | 侧栏、会话头、`?c=` 深链、消息区（Markdown + 高亮 + 四种态）、输入区与流式发送（停止/草稿）、模型切换（带服务商身份 + 回落痕迹）、无服务商/无激活两横幅、键盘可达、文案纪律 |
 | 测试 | ✅ | Go 99 个测试函数（6 包全绿）；前端 237 个 vitest 用例（40 文件全绿） |
 | 版本控制 | ✅ | `main` → `origin`（2026-10-26 初始化，`.agents/` 与 `node_modules/` 不入库） |
 
