@@ -2,6 +2,8 @@
 
 ## 状态
 
+**已改判（2026-10-26）** —— 本 ADR 的"复用一个端点"结论**保留**，但"靠 `messageId` 的 role 隐式判别"这一半被 ADR-0017 取代：改为请求体显式 `type` 字段（`send` / `regenerate`），`messageId` 拆成 `userMessageId` + `assistantMessageId`。
+
 已接受（2026-10-23）
 
 ## 背景
