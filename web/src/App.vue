@@ -146,7 +146,6 @@ async function doRename(title: string): Promise<void> {
         :conversation-id="selectedId"
         :title="currentTitle"
         :ensure-conversation="ensureConversation"
-        :can-send="providers.providers.value.length > 0"
         @rename="renameOpen = true"
         @open-sidebar="sidebarOpen = true"
         @open-settings="settingsPane.openSettings"

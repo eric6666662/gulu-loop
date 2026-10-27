@@ -164,26 +164,31 @@ describe('ChatArea · 导出与复制', () => {
   })
 })
 
-describe('ChatArea · 无服务商', () => {
+// 三种空态由注入的服务商数据派生（canSend 已改为 computed，不再是 prop）
+describe('ChatArea · 无服务商 / 无激活', () => {
   afterEach(() => vi.restoreAllMocks())
 
-  it('没有可用服务商时显示横幅，且输入区禁用', async () => {
+  it('0 个服务商 → "还没有可用的服务商"横幅 + 输入禁用', async () => {
     vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
 
-    const w = mountChatArea({ conversationId: 'c1', title: 't', canSend: false })
+    const providers = activeProviders()
+    providers.providers.value = []
+    const w = mountWith(providers, { conversationId: 'c1', title: 't' } as never)
     await flushPromises()
 
     expect(w.text()).toContain('还没有可用的服务商')
+    expect(w.find('[data-no-active]').exists()).toBe(false)
     expect(w.find('[data-composer-textarea]').attributes('disabled')).toBeDefined()
   })
 
-  it('有服务商时不显示横幅', async () => {
+  it('有服务商且有激活 → 不显示任何横幅', async () => {
     vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
 
-    const w = mountChatArea({ conversationId: 'c1', title: 't', canSend: true })
+    const w = mountChatArea({ conversationId: 'c1', title: 't' })
     await flushPromises()
 
     expect(w.text()).not.toContain('还没有可用的服务商')
+    expect(w.text()).not.toContain('还没有激活的服务商')
   })
 })
 
@@ -224,5 +229,60 @@ describe('ChatArea · 模型回落痕迹（任务 17）', () => {
     await flushPromises()
 
     expect(w.text()).not.toContain('服务商换成 relay')
+  })
+})
+
+describe('ChatArea · 有服务商但没有激活（任务 18）', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('有服务商无激活：显示"没有激活"横幅，且输入区与发送禁用', async () => {
+    vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
+
+    const providers = activeProviders()
+    providers.providers.value = [{ ...providers.providers.value[0]!, isActive: false }]
+    const w = mountWith(providers, { conversationId: 'c1', title: 't' } as never)
+    await flushPromises()
+
+    expect(w.text()).toContain('还没有激活的服务商')
+    expect(w.find('[data-no-active]').exists()).toBe(true)
+    expect(w.find('[data-composer-textarea]').attributes('disabled')).toBeDefined()
+    expect(w.find('[data-primary]').attributes('disabled')).toBeDefined()
+  })
+
+  it('没有服务商：只显示"还没有可用的服务商"横幅（两横幅互斥）', async () => {
+    vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
+
+    const providers = activeProviders()
+    providers.providers.value = []
+    const w = mountWith(providers, { conversationId: 'c1', title: 't' } as never)
+    await flushPromises()
+
+    expect(w.text()).toContain('还没有可用的服务商')
+    expect(w.find('[data-no-active]').exists()).toBe(false)
+    expect(w.find('[data-composer-textarea]').attributes('disabled')).toBeDefined()
+  })
+
+  it('有激活的服务商：两个横幅都不出现，输入区可用', async () => {
+    vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
+
+    const w = mountChatArea({ conversationId: 'c1', title: 't' })
+    await flushPromises()
+
+    expect(w.text()).not.toContain('还没有可用的服务商')
+    expect(w.text()).not.toContain('还没有激活的服务商')
+    expect(w.find('[data-composer-textarea]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('点「去选择」→ 打开服务商设置', async () => {
+    vi.spyOn(api, 'list').mockResolvedValue({ list: [], hasMore: false })
+
+    const providers = activeProviders()
+    providers.providers.value = [{ ...providers.providers.value[0]!, isActive: false }]
+    const w = mountWith(providers, { conversationId: 'c1', title: 't' } as never)
+    await flushPromises()
+
+    await w.find('[data-no-active]').find('[data-open-settings-list]').trigger('click')
+
+    expect(w.emitted('open-settings')).toHaveLength(1)
   })
 })

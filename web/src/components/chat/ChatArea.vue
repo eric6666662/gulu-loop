@@ -2,6 +2,7 @@
 import { computed, inject, ref } from 'vue'
 import ChatHeader from './ChatHeader.vue'
 import MessageList from './MessageList.vue'
+import NoActiveProviderBanner from './NoActiveProviderBanner.vue'
 import ProviderBanner from './ProviderBanner.vue'
 import Composer from './Composer.vue'
 import EditMessageDialog from '../dialog/EditMessageDialog.vue'
@@ -20,8 +21,6 @@ const props = defineProps<{
   title: string
   /** 草稿态首次发送时由 App 注入：先建会话再发 */
   ensureConversation?: () => Promise<string>
-  /** 有没有可用服务商（没有时禁止发送） */
-  canSend?: boolean
 }>()
 const emit = defineEmits<{
   rename: []
@@ -30,6 +29,14 @@ const emit = defineEmits<{
   'conversation-ready': [id: string]
   done: [conversationId: string, messageCount: number]
 }>()
+
+// 三种空态由注入的服务商数据派生（02-前端设计.md §3），App 只管加载：
+//   0 个服务商        → ProviderBanner「还没有可用的服务商」
+//   有服务商但没激活  → NoActiveProviderBanner「还没有激活的服务商」
+//   有激活的服务商    → 无横幅、可发送
+const canSend = computed(
+  () => providers.providers.value.length > 0 && providers.activeProvider.value !== null,
+)
 
 const conversationId = computed(() => props.conversationId)
 const isDraft = computed(() => props.conversationId === '')
@@ -132,7 +139,11 @@ defineExpose({
       @open-sidebar="emit('open-sidebar')"
     />
 
-    <ProviderBanner v-if="canSend === false" @open-settings="emit('open-settings')" />
+    <ProviderBanner v-if="providers.providers.value.length === 0" @open-settings="emit('open-settings')" />
+    <NoActiveProviderBanner
+      v-else-if="!canSend"
+      @open-settings="emit('open-settings')"
+    />
 
     <div class="scroll-thin min-h-0 flex-1 overflow-y-auto">
       <MessageList
@@ -161,7 +172,7 @@ defineExpose({
     <Composer
       ref="composer"
       :streaming="status === 'streaming'"
-      :disabled="canSend === false"
+      :disabled="!canSend"
       :models="selection.models.value"
       :model="selection.label.value"
       :provider="providers.activeProvider.value?.serviceProvider ?? ''"
